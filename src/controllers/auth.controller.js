@@ -15,10 +15,10 @@ function signRefresh(userId) {
 function setRefreshCookie(res, token) {
   res.cookie('refresh_token', token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
+    secure: true,      
+    sameSite: 'none',     
+    path: '/auth/refresh',
     maxAge: REFRESH_TTL_DAYS * 24 * 3600 * 1000,
-    domain: process.env.COOKIE_DOMAIN
   });
 }
 
