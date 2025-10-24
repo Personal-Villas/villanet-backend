@@ -24,17 +24,20 @@ function setRefreshCookie(res, token) {
 
 export const AuthController = {
   async register(req, res) {
-    const { email, password, full_name } = req.body || {};
+    const { email, password, full_name, role } = req.body || {};
     if (!email || !password) return res.status(400).json({ message: 'email and password required' });
 
     const hash = await bcrypt.hash(String(password), 10);
+    const newRole = (role && ['admin','ta','pmc'].includes(role)) ? role : Roles.TA;
+
     const { rows } = await pool.query(
-      `INSERT INTO users (email, password_hash, full_name, status, trial_expires_at)
-       VALUES ($1,$2,$3,$4, now() + interval '24 hours')
+      `INSERT INTO users (email, password_hash, full_name, role, status, trial_expires_at)
+       VALUES ($1,$2,$3,$4,$5, now() + interval '24 hours')
        ON CONFLICT (email) DO NOTHING
        RETURNING id, email, role, status, trial_expires_at`,
-      [String(email).toLowerCase(), hash, full_name || null, Status.PENDING]
+      [String(email).toLowerCase(), hash, full_name || null, newRole, Status.PENDING]
     );
+    
     if (!rows.length) return res.status(409).json({ message: 'Email already exists' });
 
     const u = rows[0];

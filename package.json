@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "nodemon src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "sync:listings": "node scripts/sync_listings.mjs",
+    "sync-listings": "node scripts/sync_listings.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
