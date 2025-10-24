@@ -111,7 +111,12 @@ export const AuthController = {
   async logout(req, res) {
     const token = req.cookies?.refresh_token;
     if (token) await pool.query(`UPDATE refresh_tokens SET revoked=true WHERE token=$1`, [token]);
-    res.clearCookie('refresh_token', { domain: process.env.COOKIE_DOMAIN, httpOnly: true, sameSite: 'lax' });
+    res.clearCookie('refresh_token', {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none',
+      path: '/auth/refresh'
+    });
     res.json({ ok: true });
   },
 
