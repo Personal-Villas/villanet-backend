@@ -9,6 +9,8 @@ import adminRoutes from './routes/admin.routes.js';
 import listingsRoutes from './routes/listings.routes.js';
 import pmcRoutes from './routes/pmc.routes.js';
 import syncRoutes from './routes/sync.routes.js';
+import availabilityRoutes from './routes/availability.routes.js';
+
 
 const app = express();
 
@@ -17,6 +19,7 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
   origin: ['http://localhost:3000',
+    'http://localhost:4000',
     'https://villanet-frontend.onrender.com'
   ],
   credentials: true
@@ -29,6 +32,8 @@ app.use('/admin', adminRoutes);
 app.use('/listings', listingsRoutes);
 app.use('/pmc', pmcRoutes);
 app.use('/sync', syncRoutes);
+app.use('/availability', availabilityRoutes);
+
 
 const port = Number(process.env.PORT || 4000);
 app.listen(port, () => console.log(`API listening on :${port}`));
