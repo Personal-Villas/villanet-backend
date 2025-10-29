@@ -17,6 +17,7 @@
     "express": "^4.19.2",
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
+    "node-cache": "^5.1.2",
     "p-limit": "^7.2.0",
     "pg": "^8.12.0"
   },

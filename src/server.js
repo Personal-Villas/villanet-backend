@@ -8,7 +8,6 @@ import authRoutes from './routes/auth.routes.js';
 import adminRoutes from './routes/admin.routes.js';
 import listingsRoutes from './routes/listings.routes.js';
 import pmcRoutes from './routes/pmc.routes.js';
-import syncRoutes from './routes/sync.routes.js';
 import availabilityRoutes from './routes/availability.routes.js';
 
 const app = express();
@@ -41,7 +40,6 @@ app.use('/auth', authRoutes);
 app.use('/admin', adminRoutes);
 app.use('/listings', listingsRoutes);
 app.use('/pmc', pmcRoutes);
-app.use('/sync', syncRoutes);
 app.use('/availability', availabilityRoutes);
 
 /* 🔹 Catch-all simple (opcional) */

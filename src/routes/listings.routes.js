@@ -2,19 +2,13 @@ import { Router } from 'express';
 import { auth } from '../middleware/auth.js';
 import { requireRole } from '../middleware/requireRole.js';
 import { pool } from '../db.js';
+import { cache } from '../cache.js';
 
 const r = Router();
 
 /**
  * GET /listings
- * Params (query):
- *  - q: string (3+ chars) -> busca en name / location_text / city / country (usa trigram si está habilitado)
- *  - bedrooms: ej "2,3,5+" (múltiples valores)
- *  - bathrooms: ej "2,3,5+" (múltiples valores)
- *  - minPrice / maxPrice: números (USD)
- *  - limit: default 30 (máx 100)
- *  - offset: default 0
- *  - sort: "price_asc" | "price_desc" | "updated_desc" (default)
+ * Con caché inteligente
  */
 r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
   try {
@@ -24,30 +18,54 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       bathrooms = '',
       minPrice = '',
       maxPrice = '',
-      limit = '30',
+      limit = '24',
       offset = '0',
       sort = 'updated_desc'
     } = req.query;
 
+    // 🔑 Genera una clave única basada en los parámetros de búsqueda
+    // Normalizamos para que "bedrooms=2,3" y "bedrooms=3,2" sean la misma clave
+    const normalizedQuery = {
+      q: q.trim().toLowerCase(),
+      bedrooms: bedrooms.split(',').filter(Boolean).sort().join(','),
+      bathrooms: bathrooms.split(',').filter(Boolean).sort().join(','),
+      minPrice: minPrice || '',
+      maxPrice: maxPrice || '',
+      limit,
+      offset,
+      sort
+    };
+    
+    const cacheKey = `listings:${JSON.stringify(normalizedQuery)}`;
+
+    // 🎯 Intenta obtener del caché
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      console.log(`[Cache HIT] ${cacheKey}`);
+      return res.json(cached);
+    }
+
+    console.log(`[Cache MISS] ${cacheKey}`);
+
+    // --- Tu código original de consulta a la BD ---
     const clauses = [];
     const params = [];
 
-    // Búsqueda (usa trigram si tenés pg_trgm + índice)
     const qNorm = q.trim().toLowerCase();
     if (qNorm.length >= 3) {
       params.push(`%${qNorm}%`);
       const idx = params.length;
-      clauses.push(`(LOWER(name) ILIKE $${idx} OR LOWER(location_text) ILIKE $${idx} OR LOWER(city) ILIKE $${idx} OR LOWER(country) ILIKE $${idx})`);
+      clauses.push(`(
+        LOWER(name) ILIKE $${idx} OR 
+        LOWER(location_text) ILIKE $${idx} OR 
+        LOWER(city) ILIKE $${idx} OR 
+        LOWER(country) ILIKE $${idx}
+      )`);
     }
 
-    // Bedrooms: admite números y "5+" / "6+" (>=5 / >=6)
-    const bedroomsList = bedrooms
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean);
-
+    const bedroomsList = bedrooms.split(',').map(s => s.trim()).filter(Boolean);
     if (bedroomsList.length) {
-      const nums = bedroomsList.filter(v => /^\d+$/.test(v)).map(v => Number(v));
+      const nums = bedroomsList.filter(v => /^\d+$/.test(v)).map(Number);
       const has5plus = bedroomsList.includes('5+');
       const has6plus = bedroomsList.includes('6+');
 
@@ -61,14 +79,9 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       if (parts.length) clauses.push(`(${parts.join(' OR ')})`);
     }
 
-    // Bathrooms: idem bedrooms
-    const bathroomsList = bathrooms
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean);
-
+    const bathroomsList = bathrooms.split(',').map(s => s.trim()).filter(Boolean);
     if (bathroomsList.length) {
-      const nums = bathroomsList.filter(v => /^\d+$/.test(v)).map(v => Number(v));
+      const nums = bathroomsList.filter(v => /^\d+$/.test(v)).map(Number);
       const has5plus = bathroomsList.includes('5+');
 
       const parts = [];
@@ -80,7 +93,6 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       if (parts.length) clauses.push(`(${parts.join(' OR ')})`);
     }
 
-    // Precio
     if (minPrice) {
       params.push(Number(minPrice));
       clauses.push(`price_usd >= $${params.length}`);
@@ -90,25 +102,20 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       clauses.push(`price_usd <= $${params.length}`);
     }
 
-    // ✅ FILTRO: Excluir propiedades inactivas (images_json vacío o null)
+    clauses.push(`is_listed = true`);
     clauses.push(`(images_json IS NOT NULL AND images_json != '[]'::jsonb)`);
 
-    // WHERE
     const whereSQL = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
-    // Orden
     let orderSQL = `ORDER BY updated_at DESC`;
-    if (sort === 'price_asc') orderSQL = `ORDER BY price_usd ASC NULLS LAST`;
-    else if (sort === 'price_desc') orderSQL = `ORDER BY price_usd DESC NULLS LAST`;
-    else orderSQL = `ORDER BY updated_at DESC, price_usd ASC NULLS LAST`;
+    if (sort === 'price_asc') orderSQL = `ORDER BY price_usd ASC NULLS LAST, updated_at DESC`;
+    else if (sort === 'price_desc') orderSQL = `ORDER BY price_usd DESC NULLS LAST, updated_at DESC`;
 
-    // Paginación
-    const lim = Math.min(Math.max(parseInt(String(limit), 10) || 30, 1), 100);
+    const lim = Math.min(Math.max(parseInt(String(limit), 10) || 24, 1), 100);
     const off = Math.max(parseInt(String(offset), 10) || 0, 0);
     params.push(lim);
     params.push(off);
 
-    // ✅ Query principal CORREGIDO con aliases para el frontend
     const sql = `
       SELECT 
         listing_id as id,
@@ -119,11 +126,7 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
         location_text as location,
         city, 
         country, 
-        min_nights, 
-        is_listed, 
-        timezone, 
         hero_image_url as "heroImage",
-        images_json,
         updated_at
       FROM listings
       ${whereSQL}
@@ -139,15 +142,21 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
 
     const [rowsResult, countResult] = await Promise.all([
       pool.query(sql, params),
-      pool.query(countSQL, params.slice(0, params.length - 2)) // mismos filtros, sin limit/offset
+      pool.query(countSQL, params.slice(0, params.length - 2))
     ]);
 
-    res.json({
+    const result = {
       results: rowsResult.rows,
       total: countResult.rows[0].total,
       limit: lim,
-      offset: off
-    });
+      offset: off,
+      hasMore: off + rowsResult.rows.length < countResult.rows[0].total
+    };
+
+    // 💾 Guarda en caché (5 minutos por defecto)
+    cache.set(cacheKey, result);
+
+    res.json(result);
   } catch (err) {
     console.error('Listings DB error:', err);
     res.status(500).json({ message: err.message || 'Error fetching listings' });
@@ -156,11 +165,22 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
 
 /**
  * GET /listings/:id
- * Devuelve el registro de la tabla por primary key (listing_id)
+ * También con caché
  */
 r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
   try {
     const { id } = req.params;
+    const cacheKey = `listing:${id}`;
+
+    // Intenta obtener del caché
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      console.log(`[Cache HIT] ${cacheKey}`);
+      return res.json(cached);
+    }
+
+    console.log(`[Cache MISS] ${cacheKey}`);
+
     const { rows } = await pool.query(
       `SELECT 
         listing_id,
@@ -183,8 +203,17 @@ r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) =>
       WHERE listing_id = $1`,
       [id]
     );
-    if (!rows.length) return res.status(404).json({ message: 'Listing not found' });
-    res.json(rows[0]);
+
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Listing not found' });
+    }
+
+    const result = rows[0];
+
+    // Guarda en caché (10 minutos para detalles individuales)
+    cache.set(cacheKey, result, 600);
+
+    res.json(result);
   } catch (err) {
     console.error('Listing detail DB error:', err);
     res.status(500).json({ message: err.message || 'Error fetching listing detail' });
