@@ -1,6 +1,9 @@
 import axios from 'axios';
+import { cache } from './cache.js'; 
 
 const BASE_URL = 'https://open-api.guesty.com/v1';
+
+// --- Funciones Auxiliares ---
 
 function getNextCursor(data) {
   if (data?.next) {
@@ -23,6 +26,30 @@ async function createClient(guestyToken) {
     timeout: 30000
   });
 }
+
+/**
+ * Lógica central de manejo del 429 para reintentos.
+ * Utiliza el encabezado Retry-After si está disponible, sino usa backoff exponencial simple.
+ * @param {object} e - El error de Axios.
+ * @param {number} attempt - El número de intento actual.
+ * @returns {number} El tiempo de espera en milisegundos.
+ */
+function handleRateLimit(e, attempt) {
+    const retryAfter = e.response.headers['retry-after'];
+    let waitTimeMs = 400 * attempt; 
+    
+    if (retryAfter) {
+        // Guesty proporciona el valor en segundos
+        const waitSeconds = parseInt(retryAfter, 10);
+        waitTimeMs = waitSeconds * 1000;
+        console.warn(`[Guesty] 429: Usando Retry-After de ${waitSeconds}s.`);
+    } else {
+        console.warn(`[Guesty] 429: Usando backoff simple de ${waitTimeMs / 1000}s. (Intento ${attempt})`);
+    }
+    return waitTimeMs;
+}
+
+// --- Mappers ---
 
 export function mapListingMinimal(l) {
   const id = l?._id || l?.id || null;
@@ -75,6 +102,8 @@ export function mapListingMinimal(l) {
   return { id, name, bedrooms, bathrooms, priceUSD, location, heroImage };
 }
 
+// --- Funciones de Fetching ---
+
 export async function fetchAllListings(guestyToken, limit = 50) {
   const api = await createClient(guestyToken);
   const results = [];
@@ -84,7 +113,6 @@ export async function fetchAllListings(guestyToken, limit = 50) {
     const params = { limit };
     if (cursor) params.cursor = cursor;
 
-    // backoff simple ante 429
     let data;
     for (let attempt = 1; attempt <= 5; attempt++) {
       try {
@@ -93,7 +121,8 @@ export async function fetchAllListings(guestyToken, limit = 50) {
         break;
       } catch (e) {
         if (e?.response?.status === 429 && attempt < 5) {
-          await sleep(400 * attempt);
+          const waitTimeMs = handleRateLimit(e, attempt);
+          await sleep(waitTimeMs);
           continue;
         }
         throw e;
@@ -102,7 +131,7 @@ export async function fetchAllListings(guestyToken, limit = 50) {
 
     const chunk =
       Array.isArray(data?.results) ? data.results :
-      Array.isArray(data?.data)    ? data.data    : [];
+      Array.isArray(data?.data)    ? data.data    : [];
     results.push(...chunk);
 
     const next = getNextCursor(data);
@@ -122,15 +151,80 @@ export async function fetchListingById(guestyToken, id) {
       return data;
     } catch (e) {
       if (e?.response?.status === 429 && attempt < 5) {
-        await sleep(400 * attempt);
+        const waitTimeMs = handleRateLimit(e, attempt);
+        await sleep(waitTimeMs);
         continue;
       }
       throw e;
     }
   }
-  // no debería llegar acá
-  return null;
+  return null; // El throw e debería manejar esto.
 }
+
+/**
+ * @name fetchAvailability
+ * @description Consulta la disponibilidad de un listing específico usando CACHÉ y manejo de 429 (Retry-After).
+ * @param {string} guestyToken - Token de acceso de Guesty.
+ * @param {string} id - ID del listing.
+ * @param {string} checkIn - Fecha de entrada (YYYY-MM-DD).
+ * @param {string} checkOut - Fecha de salida (YYYY-MM-DD).
+ * @returns {Promise<object>} Los datos de disponibilidad del listing.
+ */
+export async function fetchAvailability(guestyToken, id, checkIn, checkOut) {
+    const api = await createClient(guestyToken);
+    
+    // 1. CLAVE DE CACHÉ
+    const cacheKey = `availability:${id}:${checkIn}:${checkOut}`;
+    
+    // 2. INTENTO DE CACHÉ (Máxima Prioridad)
+    const cachedData = cache.get(cacheKey);
+    if (cachedData) {
+        console.log(`[Guesty] HIT: Disponibilidad para ${id} desde caché.`);
+        return cachedData;
+    }
+
+    // 3. LLAMADA A LA API CON REINTENTO Y BACKOFF
+    const endpoint = `/listings/${id}/availability`;
+    const params = { checkIn, checkOut };
+
+    for (let attempt = 1; attempt <= 5; attempt++) {
+        try {
+            console.log(`[Guesty] MISS: Consultando disponibilidad para ${id} (Intento ${attempt}/${5})...`);
+            
+            const { data } = await api.get(endpoint, { params });
+            
+            // Éxito: Guardar en caché y devolver
+            // stdTTL: 300 segundos (5 minutos) - definido en cache.js
+            cache.set(cacheKey, data); 
+            console.log(`[Guesty] SET: Disponibilidad de ${id} almacenada en caché.`);
+            return data;
+
+        } catch (e) {
+            // Manejo de 429
+            if (e?.response?.status === 429 && attempt < 5) {
+                const waitTimeMs = handleRateLimit(e, attempt);
+                await sleep(waitTimeMs);
+                continue; 
+            }
+            
+            // Si el error no es 429, o es 429 y es el último intento, lanzarlo.
+            // Para 429 en el último intento, lanzar un error especial para el controller.
+            if (e?.response?.status === 429) {
+                const waitTimeMs = handleRateLimit(e, attempt);
+                const retryError = new Error('Rate limit exceeded after multiple retries.');
+                retryError.status = 429;
+                retryError.waitTimeMs = waitTimeMs;
+                throw retryError;
+            }
+            
+            // Lanzar otros errores (401, 404, etc.)
+            throw e;
+        }
+    }
+}
+
+
+// --- Otras Funciones de Mapeo ---
 
 // Extrae una galería ordenada y sin duplicados
 export function extractImageUrlsFromListing(l) {
@@ -150,9 +244,9 @@ export function extractImageUrlsFromListing(l) {
   // variantes que a veces aparecen en cuentas migradas
   if (l?.coverPhoto?.url) push(l.coverPhoto.url);
   if (Array.isArray(l?.media?.photos)) for (const p of l.media.photos) push(p?.url || p?.large || p?.original);
-  if (Array.isArray(l?.gallery))       for (const p of l.gallery)       push(p?.url);
+  if (Array.isArray(l?.gallery))       for (const p of l.gallery)       push(p?.url);
   if (Array.isArray(l?.galleryImages)) for (const p of l.galleryImages) push(p?.url);
-  if (Array.isArray(l?.photos))        for (const p of l.photos)        push(p?.url || p?.large || p?.original);
+  if (Array.isArray(l?.photos))        for (const p of l.photos)        push(p?.url || p?.large || p?.original);
 
   const seen = new Set();
   const out = [];

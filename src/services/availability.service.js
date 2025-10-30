@@ -1,9 +1,10 @@
+// services/availability.service.js
 import pLimit from 'p-limit';
 import { guesty } from './guestyClient.js';
 
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 min
-const cache = new Map();       // key -> { data, expires }
-const inflight = new Map();    // key -> Promise
+const cache = new Map();             // key -> { data, expires }
+const inflight = new Map();          // key -> Promise
 
 const keyOf = (ids, from, to) => `avail:${[...ids].sort().join(',')}:${from}:${to}`;
 
@@ -41,7 +42,6 @@ function normalizeDay(d = {}) {
 
   const status = d.status ?? (allotment != null ? (allotment > 0 ? 'available' : 'unavailable') : null);
 
-  // flags típicos de restricción
   const cta = d.cta ?? d.checkInAllowed ?? null;
   const ctd = d.ctd ?? d.checkOutAllowed ?? null;
 
@@ -50,11 +50,6 @@ function normalizeDay(d = {}) {
 
 /** Extrae [{ listingId, days[] }] de cualquier forma de respuesta */
 function normalizeCalendarResponse(data) {
-  // Puede venir:
-  // 1) { data: [ { listingId, days|calendar: [] }, ... ] }
-  // 2) [ { listingId, days|calendar: [] }, ... ]
-  // 3) { listingId, days|calendar: [] }  (poco frecuente)
-  // 4) { data: { ... } } (envoltura simple)
   const candidates = [];
 
   const tryPush = (x) => {
@@ -95,7 +90,6 @@ async function fetchBatch(ids, from, to, retries = 2) {
       );
 
       const result = normalizeCalendarResponse(data);
-
       console.log(`[fetchBatch] Success: ${result.length} listings returned`);
       return result;
     } catch (err) {
@@ -104,22 +98,14 @@ async function fetchBatch(ids, from, to, retries = 2) {
       const msg = err?.message;
       const code = err?.code;
 
-      console.error(`[fetchBatch] Attempt ${attempt + 1} failed:`, {
-        code, message: msg, status,
-      });
+      console.error(`[fetchBatch] Attempt ${attempt + 1} failed:`, { code, message: msg, status });
 
       // No reintentar en ciertos errores
-      if (code === 'ENOTFOUND') {
-        console.error('[fetchBatch] DNS resolution failed - network issue');
-        break;
-      }
-      if (status === 401 || status === 403 || status === 422) {
-        console.error('[fetchBatch] Auth/validation error - not retrying');
-        break;
-      }
+      if (code === 'ENOTFOUND') break;
+      if (status === 401 || status === 403 || status === 422) break;
 
       if (attempt < retries) {
-        // Manejo de 429: respetar Retry-After si viene
+        // Respeta Retry-After si viene en 429
         let delay = Math.min(1000 * Math.pow(2, attempt), 5000);
         if (status === 429) {
           const ra = err?.response?.headers?.['retry-after'];
@@ -128,8 +114,7 @@ async function fetchBatch(ids, from, to, retries = 2) {
             delay = Math.min(hinted * 1000, 15000);
           }
         }
-        // jitter
-        delay += Math.floor(Math.random() * 250);
+        delay += Math.floor(Math.random() * 250); // jitter
         console.log(`[fetchBatch] Waiting ${delay}ms before retry...`);
         await sleep(delay);
       }
@@ -157,7 +142,7 @@ function computeNightlyFrom(days) {
 }
 
 /**
- * Batch: devuelve resumen por listing:
+ * Batch: devuelve resumen por listing
  * [{ listing_id, available, nightlyFrom }]
  */
 export async function getAvailabilityFor(ids, from, to) {
@@ -177,18 +162,17 @@ export async function getAvailabilityFor(ids, from, to) {
 
   const p = (async () => {
     try {
-      const limit = pLimit(3);         // concurrencia controlada
-      const batches = chunk(ids, 50);  // tamaño de batch recomendado por Guesty
+      // Concurrencia interna controlada; además, cada request ya pasa por guestyLimiter
+      const limit = pLimit(3);
+      const batches = chunk(ids, 50);
 
-      console.log(
-        `[getAvailabilityFor] Fetching ${ids.length} listings in ${batches.length} batches`
-      );
+      console.log(`[getAvailabilityFor] Fetching ${ids.length} listings in ${batches.length} batches`);
 
       const pieces = await Promise.all(
         batches.map(b => limit(() => fetchBatch(b, from, to)))
       );
 
-      // Unificar resultados por listingId normalizado (string)
+      // Unificar resultados por listingId
       const map = new Map(); // listingId -> days[]
       for (const arr of pieces) {
         for (const item of arr) {
@@ -197,7 +181,7 @@ export async function getAvailabilityFor(ids, from, to) {
         }
       }
 
-      // Construir respuesta respetando el orden de entrada
+      // Respuesta final, respetando orden de entrada
       const result = ids.map(idRaw => {
         const id = String(idRaw);
         const days = map.get(id) || [];
@@ -233,5 +217,51 @@ export async function getAvailabilityFor(ids, from, to) {
   })();
 
   inflight.set(key, p);
+  return p;
+}
+
+// === Cache de DAYS por listingId+rango (para detalle) ===
+const DAYS_TTL_MS = 10 * 60 * 1000; // 10 min
+const daysCache = new Map();        // key -> { data, expires }
+const daysInflight = new Map();     // key -> Promise
+const daysKey = (id, from, to) => `days:${id}:${from}:${to}`;
+
+function daysGet(key) {
+  const hit = daysCache.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expires) {
+    daysCache.delete(key);
+    return null;
+  }
+  return hit.data;
+}
+
+function daysSet(key, data, ttl = DAYS_TTL_MS) {
+  daysCache.set(key, { data, expires: Date.now() + ttl });
+}
+
+/**
+ * Days para UN listing (usa el mismo fetchBatch bajo el capó)
+ */
+export async function getDaysForListing(id, from, to) {
+  const key = daysKey(id, from, to);
+  const cached = daysGet(key);
+  if (cached) return cached;
+
+  if (daysInflight.has(key)) return daysInflight.get(key);
+
+  const p = (async () => {
+    try {
+      const arr = await fetchBatch([String(id)], from, to);
+      const entry = Array.isArray(arr) ? arr.find(x => String(x.listingId) === String(id)) : null;
+      const days = entry && Array.isArray(entry.days) ? entry.days : [];
+      daysSet(key, days);
+      return days;
+    } finally {
+      daysInflight.delete(key);
+    }
+  })();
+
+  daysInflight.set(key, p);
   return p;
 }

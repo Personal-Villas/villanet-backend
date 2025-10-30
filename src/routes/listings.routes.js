@@ -23,8 +23,7 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       sort = 'updated_desc'
     } = req.query;
 
-    // 🔑 Genera una clave única basada en los parámetros de búsqueda
-    // Normalizamos para que "bedrooms=2,3" y "bedrooms=3,2" sean la misma clave
+    // 🔑 Clave de caché normalizada
     const normalizedQuery = {
       q: q.trim().toLowerCase(),
       bedrooms: bedrooms.split(',').filter(Boolean).sort().join(','),
@@ -35,19 +34,17 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       offset,
       sort
     };
-    
     const cacheKey = `listings:${JSON.stringify(normalizedQuery)}`;
 
-    // 🎯 Intenta obtener del caché
+    // 🎯 Cache HIT
     const cached = cache.get(cacheKey);
     if (cached) {
       console.log(`[Cache HIT] ${cacheKey}`);
       return res.json(cached);
     }
-
     console.log(`[Cache MISS] ${cacheKey}`);
 
-    // --- Tu código original de consulta a la BD ---
+    // --- Construcción de filtros ---
     const clauses = [];
     const params = [];
 
@@ -102,6 +99,7 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       clauses.push(`price_usd <= $${params.length}`);
     }
 
+    // Solo listadas y con imágenes
     clauses.push(`is_listed = true`);
     clauses.push(`(images_json IS NOT NULL AND images_json != '[]'::jsonb)`);
 
@@ -126,7 +124,8 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
         location_text as location,
         city, 
         country, 
-        hero_image_url as "heroImage",
+        COALESCE(hero_image_url, '') as "heroImage",
+        COALESCE(images_json, '[]'::jsonb) as images_json,  
         updated_at
       FROM listings
       ${whereSQL}
@@ -153,9 +152,8 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       hasMore: off + rowsResult.rows.length < countResult.rows[0].total
     };
 
-    // 💾 Guarda en caché (5 minutos por defecto)
+    // 💾 Cache 5 min
     cache.set(cacheKey, result);
-
     res.json(result);
   } catch (err) {
     console.error('Listings DB error:', err);
@@ -172,7 +170,6 @@ r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) =>
     const { id } = req.params;
     const cacheKey = `listing:${id}`;
 
-    // Intenta obtener del caché
     const cached = cache.get(cacheKey);
     if (cached) {
       console.log(`[Cache HIT] ${cacheKey}`);
@@ -210,9 +207,7 @@ r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) =>
 
     const result = rows[0];
 
-    // Guarda en caché (10 minutos para detalles individuales)
-    cache.set(cacheKey, result, 600);
-
+    cache.set(cacheKey, result, 600); // 10 min
     res.json(result);
   } catch (err) {
     console.error('Listing detail DB error:', err);

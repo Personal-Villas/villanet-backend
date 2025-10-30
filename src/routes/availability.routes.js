@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { pool } from '../db.js';
-import { getAvailabilityFor } from '../services/availability.service.js';
-import { guesty } from '../services/guestyClient.js';
+import { getAvailabilityFor, getDaysForListing } from '../services/availability.service.js';
 
 const r = Router();
 
@@ -110,59 +109,15 @@ r.get('/:id', async (req, res) => {
 
     console.log(`[availability/:id] Fetching for ${id} from ${from} to ${to}`);
 
-    // 1) Intento principal contra Guesty
+    // 1) Intento principal usando el MISMO pipeline (backoff/429 + rate-limit + cache)
     let days = [];
     try {
-      const response = await guesty.get(
-        '/v1/availability-pricing/api/calendar/listings',
-        {
-          params: { listingIds: id, startDate: from, endDate: to },
-          timeout: 10000
-        }
-      );
-
-      console.log('🔍 Response structure:', JSON.stringify(response.data, null, 2).substring(0, 500));
-
-      // ESTRUCTURA CORRECTA DE GUESTY: response.data.data.days
-      let raw = [];
+      days = await getDaysForListing(id, from, to); // 👈 usa fetchBatch por debajo
+      console.log(`[availability/:id] Success: ${days.length} days received via pipeline`);
       
-      if (response.data?.data?.days && Array.isArray(response.data.data.days)) {
-        // Estructura confirmada de Guesty
-        raw = response.data.data.days;
-        console.log('✅ Estructura Guesty confirmada: response.data.data.days');
-      } else {
-        console.log('❌ Estructura inesperada de Guesty');
-        console.log('🔍 Keys disponibles:', Object.keys(response.data || {}));
+      if (days.length > 0) {
+        console.log('🔍 Estructura del primer día:', JSON.stringify(days[0], null, 2));
       }
-
-      console.log(`[availability/:id] Success: ${raw.length} days received from Guesty`);
-
-      if (raw.length > 0) {
-        console.log('🔍 Estructura del primer día:', JSON.stringify(raw[0], null, 2));
-      }
-
-      // Mapear a tu formato
-      days = raw.map(d => {
-        const mapped = {
-          date: d.date || d.day || d.startDate,
-          status: d.status ?? null,
-          allotment: Number.isFinite(+d.allotment) ? +d.allotment : null,
-          price: Number.isFinite(+d.price) ? +d.price : null,
-          cta: d.cta ?? d.checkInAllowed ?? null,
-          ctd: d.ctd ?? d.checkOutAllowed ?? null,
-          minStay: d.minNights ?? d.minStay ?? d.minimumStay ?? d.min_nights ?? null,
-        };
-        
-        // Debug del primer día mapeado
-        if (raw.indexOf(d) === 0) {
-          console.log('🔍 Primer día mapeado:', mapped);
-        }
-        
-        return mapped;
-      });
-
-      console.log(`[availability/:id] Mapped ${days.length} days successfully`);
-      
     } catch (e) {
       logError('availability/:id -> guesty', e);
       // Si falla Guesty, seguimos a fallback
