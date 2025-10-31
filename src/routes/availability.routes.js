@@ -4,7 +4,6 @@ import { getAvailabilityFor, getDaysForListing } from '../services/availability.
 
 const r = Router();
 
-/** Helper para logs detallados de errores */
 function logError(context, error) {
   console.error(`[${context}] Error:`, {
     message: error?.message,
@@ -18,14 +17,9 @@ function logError(context, error) {
   });
 }
 
-/**
- * GET /availability?checkIn=YYYY-MM-DD&checkOut=YYYY-MM-DD&bbox=n,w,s,e
- * o /availability?city=Miami&checkIn=...&checkOut=...
- */
 r.get('/', async (req, res) => {
   try {
     const { checkIn, checkOut, bbox, city } = req.query;
-
     if (!checkIn || !checkOut) {
       return res.status(400).json({ error: 'checkIn y checkOut son requeridos' });
     }
@@ -39,8 +33,8 @@ r.get('/', async (req, res) => {
         SELECT listing_id, lat, lng, hero_image_url, price_usd, name 
         FROM public.listings 
         WHERE is_listed = true 
-        AND lat BETWEEN $1 AND $2 
-        AND lng BETWEEN $3 AND $4
+          AND lat BETWEEN $1 AND $2 
+          AND lng BETWEEN $3 AND $4
       `;
       args.push(s, n, w, e);
     } else if (city) {
@@ -48,7 +42,7 @@ r.get('/', async (req, res) => {
         SELECT listing_id, lat, lng, hero_image_url, price_usd, name 
         FROM public.listings 
         WHERE is_listed = true 
-        AND LOWER(city) = LOWER($1)
+          AND LOWER(city) = LOWER($1)
       `;
       args.push(city);
     } else {
@@ -85,9 +79,7 @@ r.get('/', async (req, res) => {
     logError('availability', e);
     res.status(502).json({
       error: 'availability_failed',
-      message: e.code === 'ENOTFOUND' 
-        ? 'Unable to connect to availability service' 
-        : 'Upstream error',
+      message: e.code === 'ENOTFOUND' ? 'Unable to connect to availability service' : 'Upstream error',
     });
   }
 });
@@ -109,29 +101,36 @@ r.get('/:id', async (req, res) => {
 
     console.log(`[availability/:id] Fetching for ${id} from ${from} to ${to}`);
 
-    // 1) Intento principal usando el MISMO pipeline (backoff/429 + rate-limit + cache)
     let days = [];
+    let errorReason = null;
+    
     try {
-      days = await getDaysForListing(id, from, to); // 👈 usa fetchBatch por debajo
-      console.log(`[availability/:id] Success: ${days.length} days received via pipeline`);
-      
-      if (days.length > 0) {
-        console.log('🔍 Estructura del primer día:', JSON.stringify(days[0], null, 2));
-      }
+      days = await getDaysForListing(id, from, to);
+      console.log(`[availability/:id] Success: ${days.length} days`);
+      if (days.length) console.log('🔍 first day:', days[0]);
     } catch (e) {
       logError('availability/:id -> guesty', e);
-      // Si falla Guesty, seguimos a fallback
+      
+      // Detectar si es error de OAuth bloqueado
+      if (e.message?.includes('OAuth bloqueado') || e.message?.includes('Rate limit')) {
+        errorReason = 'oauth_rate_limited';
+        console.warn('[availability/:id] ⚠️ OAuth rate limited, usando fallback');
+      } else if (e?.response?.status === 429) {
+        errorReason = 'api_rate_limited';
+        console.warn('[availability/:id] ⚠️ API rate limited, usando fallback');
+      }
     }
 
-    // 2) Fallback: si 0 días, generamos calendario con precio base de la BD
+    // Fallback si no hay datos
     if (days.length === 0) {
       console.log('[availability/:id] No data from Guesty, using fallback');
+      
       const base = await pool.query(
         `SELECT price_usd FROM public.listings WHERE listing_id = $1 LIMIT 1`,
         [id]
       );
+      
       const basePrice = Number(base?.rows?.[0]?.price_usd) || null;
-
       const start = new Date(from);
       const end = new Date(to);
       const out = [];
@@ -146,24 +145,29 @@ r.get('/:id', async (req, res) => {
           cta: true,
           ctd: true,
           minStay: 1,
-          _source: 'fallback',
+          _source: errorReason || 'fallback',
         });
       }
+
       days = out;
       console.log(`[availability/:id] Fallback generated ${days.length} days`);
     }
 
-    return res.json({ listing_id: id, from, to, days });
-
+    return res.json({ 
+      listing_id: id, 
+      from, 
+      to, 
+      days,
+      // Incluir info de por qué se usó fallback (útil para debugging)
+      ...(errorReason && { fallback_reason: errorReason })
+    });
   } catch (e) {
     logError('availability/:id (outer)', e);
     const status = e?.response?.status;
     const msg = e?.response?.data?.message;
 
-    if (status === 422)
-      return res.status(422).json({ error: 'upstream_validation', message: msg || 'Invalid date range' });
-    if (status === 401 || status === 403)
-      return res.status(502).json({ error: 'guesty_unauthorized' });
+    if (status === 422) return res.status(422).json({ error: 'upstream_validation', message: msg || 'Invalid date range' });
+    if (status === 401 || status === 403) return res.status(502).json({ error: 'guesty_unauthorized' });
     if (e.code === 'ENOTFOUND' || e.code === 'ETIMEDOUT' || e.code === 'ECONNABORTED') {
       return res.status(502).json({ error: 'network_error' });
     }
