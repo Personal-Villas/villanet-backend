@@ -1,200 +1,76 @@
-import axios from 'axios';
 import { pool } from '../db.js';
 
-const OAUTH_URL = 'https://open-api.guesty.com/oauth2/token';
-const CLIENT_ID = process.env.GUESTY_CLIENT_ID;
-const CLIENT_SECRET = process.env.GUESTY_CLIENT_SECRET;
-
-let TOKEN = null;
-let EXPIRES_AT = 0;
-let INFLIGHT_PROMISE = null;
-let OAUTH_BLOCKED_UNTIL = 0; // Cooldown tras 429
-
-const SKEW_MS = 5 * 60 * 1000; // 5 minutos de margen
-const OAUTH_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutos de cooldown
-
 /**
- * Lee el token desde la base de datos
+ * Lee SIEMPRE el token desde la BD (tabla settings),
+ * sin pedirlo a OAuth ni escribir nada.
+ *
+ * El cron externo se encargará de renovarlo y actualizar
+ * la fila 'GUESTY_OAUTH_TOKEN' (y opcionalmente 'GUESTY_OAUTH_EXPIRES_AT').
  */
+
+const KEY_TOKEN = 'GUESTY_OAUTH_TOKEN';
+const KEY_EXPIRES_AT = 'GUESTY_OAUTH_EXPIRES_AT';
+
+// cache en memoria para evitar hits constantes a la BD
+let MEM_TOKEN = null;
+let MEM_EXPIRES_AT = 0;      // opcional: si guardás expires en la BD
+let MEM_FETCHED_AT = 0;
+
+const SOFT_TTL_MS = 5 * 60 * 1000; // 5 min (relee desde BD pasado este tiempo)
+
+/** Lee el token (y opcionalmente el expires) desde BD */
 async function readTokenFromDB() {
-  try {
-    const { rows } = await pool.query(
-      `SELECT value FROM settings WHERE key='GUESTY_OAUTH_TOKEN'`
-    );
-    const token = rows?.[0]?.value || null;
-    
-    const { rows: rowsExp } = await pool.query(
-      `SELECT value FROM settings WHERE key='GUESTY_OAUTH_EXPIRES_AT'`
-    );
-    const expiresAt = rowsExp?.[0]?.value ? Number(rowsExp[0].value) : 0;
+  const { rows } = await pool.query(
+    `SELECT key, value, extract(epoch from updated_at)*1000 as updated_ms
+     FROM settings
+     WHERE key IN ($1, $2)`,
+    [KEY_TOKEN, KEY_EXPIRES_AT]
+  );
 
-    // Validar que no haya expirado
-    if (token && expiresAt && Date.now() + SKEW_MS < expiresAt) {
-      console.log('[GuestyAuth] Token válido en DB, expira:', new Date(expiresAt).toISOString());
-      return { token, expiresAt };
-    }
-    
-    if (token && expiresAt) {
-      console.log('[GuestyAuth] Token en DB expirado');
-    }
-    
-    return { token: null, expiresAt: 0 };
-  } catch (err) {
-    console.error('[GuestyAuth] Error leyendo de DB:', err.message);
-    return { token: null, expiresAt: 0 };
+  let token = null;
+  let expiresAt = 0;
+
+  for (const r of rows) {
+    if (r.key === KEY_TOKEN) token = r.value;
+    if (r.key === KEY_EXPIRES_AT) expiresAt = Number(r.value) || 0;
   }
+  if (!token) {
+    throw new Error('Guesty OAuth token not found in settings (GUESTY_OAUTH_TOKEN).');
+  }
+  return { token, expiresAt };
 }
 
-/**
- * Guarda el token en la base de datos
- */
-async function writeTokenToDB(token, expiresAt) {
-  try {
-    await pool.query(`
-      INSERT INTO settings(key, value) 
-      VALUES('GUESTY_OAUTH_TOKEN', $1)
-      ON CONFLICT(key) DO UPDATE 
-      SET value=excluded.value, updated_at=now()
-    `, [token]);
-
-    await pool.query(`
-      INSERT INTO settings(key, value) 
-      VALUES('GUESTY_OAUTH_EXPIRES_AT', $1)
-      ON CONFLICT(key) DO UPDATE 
-      SET value=excluded.value, updated_at=now()
-    `, [String(expiresAt)]);
-    
-    console.log('[GuestyAuth] Token guardado en DB');
-  } catch (err) {
-    console.error('[GuestyAuth] Error guardando en DB:', err.message);
-  }
-}
-
-/**
- * Verifica si el token en memoria es válido
- */
-function isValid() {
-  return TOKEN && Date.now() + SKEW_MS < EXPIRES_AT;
-}
-
-/**
- * Solicita un nuevo token OAuth a Guesty
- */
-async function requestNewToken() {
-  // Verificar si estamos en cooldown por 429
-  const now = Date.now();
-  if (now < OAUTH_BLOCKED_UNTIL) {
-    const waitSeconds = Math.ceil((OAUTH_BLOCKED_UNTIL - now) / 1000);
-    const waitMinutes = Math.ceil(waitSeconds / 60);
-    throw new Error(`OAuth endpoint bloqueado por rate limit. Reintenta en ${waitMinutes} minutos.`);
-  }
-
-  console.log('[GuestyAuth] Solicitando nuevo token OAuth...');
-
-  try {
-    const resp = await axios.post(
-      OAUTH_URL,
-      new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: CLIENT_ID,
-        client_secret: CLIENT_SECRET,
-        scope: 'open-api',
-      }),
-      { 
-        timeout: 15000, 
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' } 
-      }
-    );
-
-    const { access_token, expires_in } = resp.data || {};
-    if (!access_token || !expires_in) {
-      throw new Error('Respuesta OAuth inválida: falta access_token o expires_in');
-    }
-
-    TOKEN = access_token;
-    EXPIRES_AT = Date.now() + (Number(expires_in) * 1000);
-
-    await writeTokenToDB(TOKEN, EXPIRES_AT);
-    
-    console.log('[GuestyAuth] ✅ Nuevo token obtenido');
-    console.log('[GuestyAuth] Expira:', new Date(EXPIRES_AT).toISOString());
-    
-    return TOKEN;
-  } catch (err) {
-    // Si recibimos 429, activar cooldown
-    if (err?.response?.status === 429) {
-      const retryAfter = err.response.headers?.['retry-after'];
-      
-      if (retryAfter) {
-        const seconds = parseInt(retryAfter, 10);
-        if (Number.isFinite(seconds) && seconds > 0) {
-          OAUTH_BLOCKED_UNTIL = Date.now() + (seconds * 1000);
-        } else {
-          OAUTH_BLOCKED_UNTIL = Date.now() + OAUTH_COOLDOWN_MS;
-        }
-      } else {
-        OAUTH_BLOCKED_UNTIL = Date.now() + OAUTH_COOLDOWN_MS;
-      }
-      
-      const blockedUntil = new Date(OAUTH_BLOCKED_UNTIL).toISOString();
-      console.error(`[GuestyAuth] ❌ 429 en endpoint OAuth. Bloqueado hasta: ${blockedUntil}`);
-      
-      throw new Error(`Rate limit en OAuth. Bloqueado hasta ${blockedUntil}`);
-    }
-    
-    console.error('[GuestyAuth] Error obteniendo token:', err.message);
-    throw err;
-  }
-}
-
-/**
- * Obtiene un token válido (memoria → DB → nuevo request)
- */
+/** Devuelve un token válido leído desde BD (cacheado unos minutos) */
 export async function getGuestyAccessToken() {
-  // 1. Si hay token válido en memoria, usarlo
-  if (isValid()) {
-    return TOKEN;
-  }
-
-  // 2. Intentar cargar desde DB
-  if (!TOKEN || !isValid()) {
-    const { token, expiresAt } = await readTokenFromDB();
-    if (token && expiresAt) {
-      TOKEN = token;
-      EXPIRES_AT = Number(expiresAt);
-      console.log('[GuestyAuth] ✅ Token cargado desde DB');
-      return TOKEN;
-    }
-  }
-
-  // 3. Si estamos bloqueados por 429, lanzar error inmediatamente
   const now = Date.now();
-  if (now < OAUTH_BLOCKED_UNTIL) {
-    const waitSeconds = Math.ceil((OAUTH_BLOCKED_UNTIL - now) / 1000);
-    const waitMinutes = Math.ceil(waitSeconds / 60);
-    throw new Error(`OAuth bloqueado por rate limit. Reintenta en ${waitMinutes} minutos.`);
+  const freshEnough = (now - MEM_FETCHED_AT) < SOFT_TTL_MS;
+
+  // si está fresco en memoria, úsalo
+  if (MEM_TOKEN && freshEnough) {
+    return MEM_TOKEN;
   }
 
-  // 4. Solicitar nuevo token (evitar múltiples requests simultáneos)
-  if (!INFLIGHT_PROMISE) {
-    INFLIGHT_PROMISE = (async () => {
-      try {
-        return await requestNewToken();
-      } finally {
-        INFLIGHT_PROMISE = null;
-      }
-    })();
-  }
-
-  return INFLIGHT_PROMISE;
+  // relee desde BD
+  const { token, expiresAt } = await readTokenFromDB();
+  MEM_TOKEN = token;
+  MEM_EXPIRES_AT = expiresAt || 0;
+  MEM_FETCHED_AT = now;
+  return MEM_TOKEN;
 }
 
 /**
- * Fuerza un refresh del token (usar con cuidado)
+ * Forzar recarga desde BD (p.ej. al recibir 401/403 desde Guesty,
+ * o cuando el cron ya actualizó el token y queremos tomarlo).
  */
 export async function forceRefreshGuestyToken() {
-  console.log('[GuestyAuth] Forzando refresh de token...');
-  TOKEN = null;
-  EXPIRES_AT = 0;
+  MEM_TOKEN = null;
+  MEM_EXPIRES_AT = 0;
+  MEM_FETCHED_AT = 0;
+  // lee inmediatamente el nuevo valor desde BD
   return getGuestyAccessToken();
+}
+
+// (Opcional) exportar el expires por si querés loguearlo
+export function getCachedGuestyExpiry() {
+  return MEM_EXPIRES_AT || 0;
 }
