@@ -9,6 +9,9 @@ import adminRoutes from './routes/admin.routes.js';
 import listingsRoutes from './routes/listings.routes.js';
 import pmcRoutes from './routes/pmc.routes.js';
 import availabilityRoutes from './routes/availability.routes.js';
+import badgesRoutes from './routes/badges.routes.js';
+import propertyBadgesRoutes from './routes/property-badges.routes.js';
+import adminPropertiesRoutes from './routes/admin.properties.routes.js';
 
 const app = express();
 
@@ -36,6 +39,9 @@ app.use('/admin', adminRoutes);
 app.use('/listings', listingsRoutes);
 app.use('/pmc', pmcRoutes);
 app.use('/availability', availabilityRoutes);
+app.use('/badges', badgesRoutes);
+app.use('/properties', propertyBadgesRoutes);
+app.use('/admin/properties', adminPropertiesRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found', path: req.originalUrl });
