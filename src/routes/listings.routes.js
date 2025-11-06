@@ -26,19 +26,20 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       maxPrice = '',
       checkIn = '',
       checkOut = '',
+      badges = '', 
       limit = '24',
       offset = '0',
       sort = 'updated_desc',
-      availabilitySession = '', // 🆕 Session ID para paginación de disponibilidad
-      availabilityCursor = '0'  // 🆕 Cursor para disponibilidad
+      availabilitySession = '',
+      availabilityCursor = '0'
     } = req.query;
 
     const lim = Math.min(Math.max(parseInt(String(limit), 10) || 24, 1), 100);
     const off = Math.max(parseInt(String(offset), 10) || 0, 0);
     const cursor = parseInt(availabilityCursor) || 0;
+    const hasAvailabilityFilter = checkIn && checkOut;
 
     // Validación de disponibilidad
-    const hasAvailabilityFilter = checkIn && checkOut;
     if (hasAvailabilityFilter) {
       const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
       if (!dateRegex.test(checkIn) || !dateRegex.test(checkOut)) {
@@ -49,7 +50,7 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       }
     }
 
-    // 🔑 Cache key (sin session/cursor para cache principal)
+    // 🔑 Cache key (agregar badges)
     const normalizedQuery = {
       q: q.trim().toLowerCase(),
       bedrooms: bedrooms.split(',').filter(Boolean).sort().join(','),
@@ -58,24 +59,17 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       maxPrice: maxPrice || '',
       checkIn: checkIn || '',
       checkOut: checkOut || '',
+      badges: badges.split(',').filter(Boolean).sort().join(','), // 🆕 Incluir badges en cache
       limit,
       offset,
       sort
     };
     const cacheKey = `listings:${JSON.stringify(normalizedQuery)}`;
 
-    // Cache hit (solo si no estamos en medio de una sesión de disponibilidad)
-    if (!availabilitySession) {
-      const cached = cache.get(cacheKey);
-      if (cached) {
-        console.log(`[Cache HIT] ${cacheKey}`);
-        return res.json(cached);
-      }
-    }
-
     // --- Construcción de filtros SQL ---
     const clauses = [];
     const params = [];
+    const joins = []; // 🆕 Array para JOINs
 
     // Búsqueda por texto
     const qNorm = q.trim().toLowerCase();
@@ -90,7 +84,38 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       )`);
     }
 
-    // Bedrooms
+    // 🆕 CONVERTIR SLUGS DE BADGES A IDs NUMÉRICOS
+    const badgeSlugs = badges.split(',').filter(Boolean);
+    let badgeIds = [];
+    
+    if (badgeSlugs.length > 0) {
+      console.log(`🛡️ Looking up badge IDs for slugs:`, badgeSlugs);
+      
+      // Consultar la base de datos para obtener los IDs numéricos
+      const badgeQuery = await pool.query(
+        `SELECT id FROM badges WHERE slug = ANY($1::text[])`,
+        [badgeSlugs]
+      );
+      
+      badgeIds = badgeQuery.rows.map(row => row.id);
+      console.log(`🛡️ Found badge IDs:`, badgeIds);
+    }
+
+    // 🆕 Filtro por badges - CORREGIDO: AGREGAR AL CLAUSES
+    if (badgeIds.length > 0) {
+      params.push(badgeIds);
+      
+      // ✅ CORRECCIÓN: Agregar la condición al WHERE usando EXISTS
+      clauses.push(`EXISTS (
+        SELECT 1 FROM property_badges pb 
+        WHERE pb.property_id = l.listing_id 
+        AND pb.badge_id = ANY($${params.length}::bigint[])
+      )`);
+      
+      console.log(`🛡️ Applied badge filter with ${badgeIds.length} badge IDs`);
+    }
+
+    // Bedrooms (código existente)
     const bedroomsList = bedrooms.split(',').map(s => s.trim()).filter(Boolean);
     if (bedroomsList.length) {
       const nums = bedroomsList.filter(v => /^\d+$/.test(v)).map(Number);
@@ -107,7 +132,7 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       if (parts.length) clauses.push(`(${parts.join(' OR ')})`);
     }
 
-    // Bathrooms
+    // Bathrooms (código existente)
     const bathroomsList = bathrooms.split(',').map(s => s.trim()).filter(Boolean);
     if (bathroomsList.length) {
       const nums = bathroomsList.filter(v => /^\d+$/.test(v)).map(Number);
@@ -122,7 +147,7 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       if (parts.length) clauses.push(`(${parts.join(' OR ')})`);
     }
 
-    // Price
+    // Price (código existente)
     if (minPrice) {
       params.push(Number(minPrice));
       clauses.push(`price_usd >= $${params.length}`);
@@ -136,9 +161,11 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
     clauses.push(`is_listed = true`);
     clauses.push(`(images_json IS NOT NULL AND images_json != '[]'::jsonb)`);
 
+    // 🆕 Construir WHERE (ya no necesitamos JOINs explícitos para badges)
     const whereSQL = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const joinSQL = joins.length ? joins.join(' ') : '';
 
-    // Ordenamiento
+    // Ordenamiento (código existente)
     let orderSQL = `ORDER BY updated_at DESC`;
     if (sort === 'price_asc') orderSQL = `ORDER BY price_usd ASC NULLS LAST, updated_at DESC`;
     else if (sort === 'price_desc') orderSQL = `ORDER BY price_usd DESC NULLS LAST, updated_at DESC`;
@@ -154,25 +181,37 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
         const batchIds = availableIds.slice(startIdx, startIdx + lim);
         
         if (batchIds.length > 0) {
-          const detailsSQL = `
+          // 🆕 Usar EXISTS para badges en sesión de disponibilidad
+          let detailsSQL = `
             SELECT 
-              listing_id as id,
-              name,
-              bedrooms,
-              bathrooms, 
-              price_usd as "priceUSD",
-              location_text as location,
-              city, 
-              country, 
-              COALESCE(hero_image_url, '') as "heroImage",
-              COALESCE(images_json, '[]'::jsonb) as images_json,  
-              updated_at
-            FROM listings 
-            WHERE listing_id = ANY($1)
-            ORDER BY array_position($1, listing_id)
+              l.listing_id as id,
+              l.name,
+              l.bedrooms,
+              l.bathrooms, 
+              l.price_usd as "priceUSD",
+              l.location_text as location,
+              l.city, 
+              l.country, 
+              COALESCE(l.hero_image_url, '') as "heroImage",
+              COALESCE(l.images_json, '[]'::jsonb) as images_json,  
+              l.updated_at
+            FROM listings l
+            WHERE l.listing_id = ANY($1)
           `;
           
-          const detailsResult = await pool.query(detailsSQL, [batchIds]);
+          // 🆕 Agregar condición de badges si es necesario
+          if (badgeIds.length > 0) {
+            detailsSQL += ` AND EXISTS (
+              SELECT 1 FROM property_badges pb 
+              WHERE pb.property_id = l.listing_id 
+              AND pb.badge_id = ANY($2::bigint[])
+            )`;
+          }
+          
+          detailsSQL += ` ORDER BY array_position($1, l.listing_id)`;
+          
+          const queryParams = badgeIds.length > 0 ? [batchIds, badgeIds] : [batchIds];
+          const detailsResult = await pool.query(detailsSQL, queryParams);
           const results = detailsResult.rows;
           
           const nextCursor = startIdx + results.length;
@@ -182,13 +221,13 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
           
           const response = {
             results: normalized,
-            total: availableIds.length, // 🆕 Total REAL de disponibles
+            total: availableIds.length,
             limit: lim,
-            offset: nextCursor, // 🆕 Usamos cursor como offset
+            offset: nextCursor,
             hasMore,
             availabilityApplied: true,
-            availabilitySession: hasMore ? availabilitySession : null, // 🆕 Session para siguientes requests
-            availabilityCursor: hasMore ? nextCursor : null // 🆕 Siguiente cursor
+            availabilitySession: hasMore ? availabilitySession : null,
+            availabilityCursor: hasMore ? nextCursor : null
           };
           
           console.log(`[Availability Session] Returning ${normalized.length} properties, cursor: ${nextCursor}, hasMore: ${hasMore}`);
@@ -222,11 +261,13 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
       
       const bulkParams = [...params];
       bulkParams.push(bulkFetchLimit);
-      bulkParams.push(off); // Usar offset normal para primera consulta
+      bulkParams.push(off);
 
+      // 🆕 Construir SQL
       const bulkSQL = `
-        SELECT listing_id as id
-        FROM listings
+        SELECT l.listing_id as id
+        FROM listings l
+        ${joinSQL}
         ${whereSQL}
         ${orderSQL}
         LIMIT $${bulkParams.length-1} OFFSET $${bulkParams.length};
@@ -255,25 +296,36 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
           const firstBatchIds = availableIds.slice(0, lim);
           
           if (firstBatchIds.length > 0) {
-            const detailsSQL = `
+            // 🆕 Usar EXISTS para badges
+            let detailsSQL = `
               SELECT 
-                listing_id as id,
-                name,
-                bedrooms,
-                bathrooms, 
-                price_usd as "priceUSD",
-                location_text as location,
-                city, 
-                country, 
-                COALESCE(hero_image_url, '') as "heroImage",
-                COALESCE(images_json, '[]'::jsonb) as images_json,  
-                updated_at
-              FROM listings 
-              WHERE listing_id = ANY($1)
-              ORDER BY array_position($1, listing_id)
+                l.listing_id as id,
+                l.name,
+                l.bedrooms,
+                l.bathrooms, 
+                l.price_usd as "priceUSD",
+                l.location_text as location,
+                l.city, 
+                l.country, 
+                COALESCE(l.hero_image_url, '') as "heroImage",
+                COALESCE(l.images_json, '[]'::jsonb) as images_json,  
+                l.updated_at
+              FROM listings l
+              WHERE l.listing_id = ANY($1)
             `;
             
-            const detailsResult = await pool.query(detailsSQL, [firstBatchIds]);
+            if (badgeIds.length > 0) {
+              detailsSQL += ` AND EXISTS (
+                SELECT 1 FROM property_badges pb 
+                WHERE pb.property_id = l.listing_id 
+                AND pb.badge_id = ANY($2::bigint[])
+              )`;
+            }
+            
+            detailsSQL += ` ORDER BY array_position($1, l.listing_id)`;
+            
+            const queryParams = badgeIds.length > 0 ? [firstBatchIds, badgeIds] : [firstBatchIds];
+            const detailsResult = await pool.query(detailsSQL, queryParams);
             const results = detailsResult.rows;
             
             const nextCursor = firstBatchIds.length;
@@ -283,13 +335,13 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
             
             const response = {
               results: normalized,
-              total: availableIds.length, // 🆕 Total REAL de disponibles
+              total: availableIds.length,
               limit: lim,
-              offset: nextCursor, // 🆕 Usamos cursor como offset
+              offset: nextCursor,
               hasMore,
               availabilityApplied: true,
-              availabilitySession: hasMore ? availabilitySessionKey : null, // 🆕 Session para siguientes requests
-              availabilityCursor: hasMore ? nextCursor : null // 🆕 Siguiente cursor
+              availabilitySession: hasMore ? availabilitySessionKey : null,
+              availabilityCursor: hasMore ? nextCursor : null
             };
             
             console.log(`[Availability Strategy] Returning ${normalized.length} properties, session: ${availabilitySessionKey}, hasMore: ${hasMore}`);
@@ -323,20 +375,22 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
     standardParams.push(lim);
     standardParams.push(off);
 
+    // 🆕 Construir SQL final
     const sql = `
       SELECT 
-        listing_id as id,
-        name,
-        bedrooms,
-        bathrooms, 
-        price_usd as "priceUSD",
-        location_text as location,
-        city, 
-        country, 
-        COALESCE(hero_image_url, '') as "heroImage",
-        COALESCE(images_json, '[]'::jsonb) as images_json,  
-        updated_at
-      FROM listings
+        l.listing_id as id,
+        l.name,
+        l.bedrooms,
+        l.bathrooms, 
+        l.price_usd as "priceUSD",
+        l.location_text as location,
+        l.city, 
+        l.country, 
+        COALESCE(l.hero_image_url, '') as "heroImage",
+        COALESCE(l.images_json, '[]'::jsonb) as images_json,  
+        l.updated_at
+      FROM listings l
+      ${joinSQL}
       ${whereSQL}
       ${orderSQL}
       LIMIT $${standardParams.length-1} OFFSET $${standardParams.length};
@@ -344,7 +398,8 @@ r.get('/', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
 
     const countSQL = `
       SELECT COUNT(*)::int AS total
-      FROM listings
+      FROM listings l
+      ${joinSQL}
       ${whereSQL};
     `;
 
