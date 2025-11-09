@@ -147,7 +147,7 @@ export const AuthController = {
            created_at  = CURRENT_TIMESTAMP, 
            used        = false, 
            attempts    = 0,
-           user_exists = $3            // 🆕 MUY IMPORTANTE: actualizar user_exists
+           user_exists = $3            
          RETURNING id`,
         [normalizedEmail, codeHash, exists]
       );
