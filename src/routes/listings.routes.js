@@ -177,8 +177,7 @@ r.get('/', auth(false), async (req, res) => {
     console.log("🔧 Building ORDER BY for:", sort);
 
     if (sort === 'rank') {
-      // ⚠️ NOTA: Este random() hace que cada query devuelva orden diferente
-      // Para producción, remover random() y usar solo l.rank
+      // ✅ FIX: Cambiado para evitar conflicto con función RANK de PostgreSQL
       orderSQL = `
         ORDER BY COALESCE(l."rank", 90 + random()*10) DESC NULLS LAST,
                  l.updated_at DESC
@@ -242,7 +241,7 @@ r.get('/', auth(false), async (req, res) => {
         });
       }
 
-      // 3.5) Query detalles ordenados
+      // ✅ FIX: Cambiado 'rank' por 'listing_rank' en SELECT
       const detailsSQL = `
         SELECT
           l.listing_id AS id,
@@ -250,7 +249,7 @@ r.get('/', auth(false), async (req, res) => {
           l.bedrooms,
           l.bathrooms,
           l.price_usd AS "priceUSD",
-          COALESCE(l."rank", 90 + random()*10) AS rank,
+          COALESCE(l."rank", 90 + random()*10) AS listing_rank,
           l.location_text AS location,
           l.city,
           l.country,
@@ -312,6 +311,7 @@ r.get('/', auth(false), async (req, res) => {
         });
       }
 
+      // ✅ FIX: Cambiado 'rank' por 'listing_rank' en SELECT
       const detailsSQL = `
         SELECT
           l.listing_id AS id,
@@ -319,7 +319,7 @@ r.get('/', auth(false), async (req, res) => {
           l.bedrooms,
           l.bathrooms,
           l.price_usd AS "priceUSD",
-          COALESCE(l."rank", 90 + random()*10) AS rank,
+          COALESCE(l."rank", 90 + random()*10) AS listing_rank,
           l.location_text AS location,
           l.city,
           l.country,
@@ -354,6 +354,7 @@ r.get('/', auth(false), async (req, res) => {
     // -----------------------------------------------------------------------
     const standardParams = [...params, lim, off];
 
+    // ✅ FIX: Cambiado 'rank' por 'listing_rank' en SELECT
     const sql = `
       SELECT
         l.listing_id AS id,
@@ -361,7 +362,7 @@ r.get('/', auth(false), async (req, res) => {
         l.bedrooms,
         l.bathrooms,
         l.price_usd AS "priceUSD",
-        COALESCE(l."rank", 90 + random()*10) AS rank,
+        COALESCE(l."rank", 90 + random()*10) AS listing_rank,
         l.location_text AS location,
         l.city,
         l.country,
@@ -395,7 +396,7 @@ r.get('/', auth(false), async (req, res) => {
         name: rows.rows[0].name,
         bedrooms: rows.rows[0].bedrooms,
         priceUSD: rows.rows[0].priceUSD,
-        rank: rows.rows[0].rank
+        listing_rank: rows.rows[0].listing_rank
       });
     }
 
@@ -473,7 +474,7 @@ r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) =>
 });
 
 /************************************************************
- * Helper normalizeResults
+ * Helper normalizeResults - CORREGIDO
  ************************************************************/
 function normalizeResults(results) {
   const PLACEHOLDER =
@@ -483,9 +484,13 @@ function normalizeResults(results) {
     const images = Array.isArray(row.images_json) ? row.images_json : [];
     const first = images[0];
 
+    // ✅ FIX: Extraer listing_rank y mapearlo a rank para el frontend
+    const { listing_rank, ...rest } = row;
+
     return {
-      ...row,
+      ...rest,
       id: row.id || `temp-${Math.random().toString(36).slice(2)}`,
+      rank: listing_rank, // Mapear listing_rank de vuelta a rank para el frontend
       images_json: images,
       heroImage:
         (typeof first === 'string' && first) ||

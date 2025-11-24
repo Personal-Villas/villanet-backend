@@ -156,7 +156,8 @@ r.get('/', async (req, res) => {
     if (sort === 'price_asc') orderSQL = `ORDER BY price_usd ASC NULLS LAST, updated_at DESC`;
     else if (sort === 'price_desc') orderSQL = `ORDER BY price_usd DESC NULLS LAST, updated_at DESC`;
     else if (sort === 'rank') {
-      orderSQL = `ORDER BY COALESCE(l."rank", 90 + random()*10) DESC NULLS LAST, updated_at DESC`;
+      // ✅ FIX: Usar l."rank" calificado para evitar conflicto con función RANK()
+      orderSQL = `ORDER BY COALESCE(l."rank", 90 + random()*10) DESC NULLS LAST, l.updated_at DESC`;
     }
 
     // Estrategia de disponibilidad (igual que antes)
@@ -168,6 +169,7 @@ r.get('/', async (req, res) => {
         const batchIds = availableIds.slice(startIdx, startIdx + lim);
         
         if (batchIds.length > 0) {
+          // ✅ FIX: Cambiado 'rank' por 'listing_rank' en SELECT
           let detailsSQL = `
             SELECT 
               l.listing_id as id,
@@ -175,7 +177,7 @@ r.get('/', async (req, res) => {
               l.bedrooms,
               l.bathrooms, 
               l.price_usd as "priceUSD",
-              COALESCE(l."rank", 90 + random()*10) as rank,
+              COALESCE(l."rank", 90 + random()*10) as listing_rank,
               l.location_text as location,
               l.city, 
               l.country, 
@@ -251,6 +253,7 @@ r.get('/', async (req, res) => {
           const firstBatchIds = availableIds.slice(0, lim);
           
           if (firstBatchIds.length > 0) {
+            // ✅ FIX: Cambiado 'rank' por 'listing_rank' en SELECT
             let detailsSQL = `
               SELECT 
                 l.listing_id as id,
@@ -258,7 +261,7 @@ r.get('/', async (req, res) => {
                 l.bedrooms,
                 l.bathrooms, 
                 l.price_usd as "priceUSD",
-                COALESCE(l."rank", 90 + random()*10) as rank,
+                COALESCE(l."rank", 90 + random()*10) as listing_rank,
                 l.location_text as location,
                 l.city, 
                 l.country, 
@@ -310,6 +313,7 @@ r.get('/', async (req, res) => {
     standardParams.push(lim);
     standardParams.push(off);
 
+    // ✅ FIX: Cambiado 'rank' por 'listing_rank' en SELECT
     const sql = `
       SELECT 
         l.listing_id as id,
@@ -317,7 +321,7 @@ r.get('/', async (req, res) => {
         l.bedrooms,
         l.bathrooms, 
         l.price_usd as "priceUSD",
-        COALESCE(l."rank", 90 + random()*10) as rank,
+        COALESCE(l."rank", 90 + random()*10) as listing_rank,
         l.location_text as location,
         l.city, 
         l.country, 
@@ -417,6 +421,7 @@ r.get('/:id', async (req, res) => {
   }
 });
 
+// ✅ FIX: Función normalizeResults actualizada para mapear listing_rank a rank
 function normalizeResults(results) {
   const PLACEHOLDER = 'https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200&q=80&auto=format&fit=crop';
   
@@ -424,9 +429,13 @@ function normalizeResults(results) {
     const images = Array.isArray(item.images_json) ? item.images_json : [];
     const first = images[0];
     
+    // ✅ FIX: Extraer listing_rank y mapearlo a rank para mantener compatibilidad con frontend
+    const { listing_rank, ...rest } = item;
+    
     return {
-      ...item,
+      ...rest,
       id: item.id || `temp-${Math.random().toString(36).slice(2)}`,
+      rank: listing_rank, // Mapear listing_rank de vuelta a rank para el frontend
       images_json: images,
       heroImage: (typeof first === 'string' && first) || item.heroImage || PLACEHOLDER,
     };
