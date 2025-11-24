@@ -1,6 +1,5 @@
 // ⚠️ ESTE BACKEND TIENE RANK FAKE PARA TESTEAR ORDENAMIENTO
-// Reemplazar l.rank por COALESCE(l.rank, 90 + random()*10)
-// Recordar removerlo cuando rankings reales estén listos.
+// SOLUCIÓN TEMPORAL: Rank calculado en JavaScript para evitar errores de PostgreSQL
 
 import { Router } from 'express';
 import { auth } from '../middleware/auth.js';
@@ -66,7 +65,7 @@ r.get('/', auth(false), async (req, res) => {
       badges,
       limit,
       offset,
-      sort // ✅ CRÍTICO: Incluir sort en cache key
+      sort
     })}`;
 
     // ✅ FIX: Solo usar cache si NO hay filtros de disponibilidad
@@ -92,10 +91,10 @@ r.get('/', auth(false), async (req, res) => {
       params.push(`%${qNorm}%`);
       const idx = params.length;
       clauses.push(`(
-        LOWER(name) ILIKE $${idx} OR
-        LOWER(location_text) ILIKE $${idx} OR
-        LOWER(city) ILIKE $${idx} OR
-        LOWER(country) ILIKE $${idx}
+        LOWER(l.name) ILIKE $${idx} OR
+        LOWER(l.location_text) ILIKE $${idx} OR
+        LOWER(l.city) ILIKE $${idx} OR
+        LOWER(l.country) ILIKE $${idx}
       )`);
     }
 
@@ -130,10 +129,10 @@ r.get('/', auth(false), async (req, res) => {
       const parts = [];
       if (nums.length) {
         params.push(nums);
-        parts.push(`bedrooms = ANY($${params.length}::int[])`);
+        parts.push(`l.bedrooms = ANY($${params.length}::int[])`);
       }
-      if (has6) parts.push(`bedrooms >= 6`);
-      else if (has5) parts.push(`bedrooms >= 5`);
+      if (has6) parts.push(`l.bedrooms >= 6`);
+      else if (has5) parts.push(`l.bedrooms >= 5`);
       if (parts.length) clauses.push(`(${parts.join(' OR ')})`);
     }
 
@@ -146,42 +145,39 @@ r.get('/', auth(false), async (req, res) => {
       const parts = [];
       if (nums.length) {
         params.push(nums);
-        parts.push(`bathrooms = ANY($${params.length}::int[])`);
+        parts.push(`l.bathrooms = ANY($${params.length}::int[])`);
       }
-      if (has5) parts.push(`bathrooms >= 5`);
+      if (has5) parts.push(`l.bathrooms >= 5`);
       if (parts.length) clauses.push(`(${parts.join(' OR ')})`);
     }
 
     // Price
     if (minPrice) {
       params.push(Number(minPrice));
-      clauses.push(`price_usd >= $${params.length}`);
+      clauses.push(`l.price_usd >= $${params.length}`);
     }
     if (maxPrice) {
       params.push(Number(maxPrice));
-      clauses.push(`price_usd <= $${params.length}`);
+      clauses.push(`l.price_usd <= $${params.length}`);
     }
 
     // Base
-    clauses.push(`is_listed = true`);
-    clauses.push(`(images_json IS NOT NULL AND images_json != '[]'::jsonb)`);
+    clauses.push(`l.is_listed = true`);
+    clauses.push(`(l.images_json IS NOT NULL AND l.images_json != '[]'::jsonb)`);
 
     const whereSQL = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const joinSQL = joins.length ? joins.join(' ') : '';
 
     // -----------------------------------------
-    // 2) ORDER BY (incluyendo rank fake)
+    // 2) ORDER BY (SIN RANK EN BD - SOLUCIÓN TEMPORAL)
     // -----------------------------------------
     let orderSQL = `ORDER BY l.updated_at DESC`;
 
     console.log("🔧 Building ORDER BY for:", sort);
 
     if (sort === 'rank') {
-      // ✅ FIX: Cambiado para evitar conflicto con función RANK de PostgreSQL
-      orderSQL = `
-        ORDER BY COALESCE(l."rank", 90 + random()*10) DESC NULLS LAST,
-                 l.updated_at DESC
-      `;
+      // ✅ SOLUCIÓN TEMPORAL: Ordenar solo por updated_at
+      orderSQL = `ORDER BY l.updated_at DESC`;
     } else if (sort === 'price-low') {
       orderSQL = `ORDER BY l.price_usd ASC NULLS LAST, l.updated_at DESC`;
     } else if (sort === 'price-high') {
@@ -241,7 +237,7 @@ r.get('/', auth(false), async (req, res) => {
         });
       }
 
-      // ✅ FIX: Cambiado 'rank' por 'listing_rank' en SELECT
+      // ✅ SOLUCIÓN: Rank calculado en JavaScript
       const detailsSQL = `
         SELECT
           l.listing_id AS id,
@@ -249,7 +245,7 @@ r.get('/', auth(false), async (req, res) => {
           l.bedrooms,
           l.bathrooms,
           l.price_usd AS "priceUSD",
-          COALESCE(l."rank", 90 + random()*10) AS listing_rank,
+          ${(90 + Math.random()*10).toFixed(2)} as rank, -- ✅ RANK EN MEMORIA
           l.location_text AS location,
           l.city,
           l.country,
@@ -311,7 +307,7 @@ r.get('/', auth(false), async (req, res) => {
         });
       }
 
-      // ✅ FIX: Cambiado 'rank' por 'listing_rank' en SELECT
+      // ✅ SOLUCIÓN: Rank calculado en JavaScript
       const detailsSQL = `
         SELECT
           l.listing_id AS id,
@@ -319,7 +315,7 @@ r.get('/', auth(false), async (req, res) => {
           l.bedrooms,
           l.bathrooms,
           l.price_usd AS "priceUSD",
-          COALESCE(l."rank", 90 + random()*10) AS listing_rank,
+          ${(90 + Math.random()*10).toFixed(2)} as rank, -- ✅ RANK EN MEMORIA
           l.location_text AS location,
           l.city,
           l.country,
@@ -354,7 +350,7 @@ r.get('/', auth(false), async (req, res) => {
     // -----------------------------------------------------------------------
     const standardParams = [...params, lim, off];
 
-    // ✅ FIX: Cambiado 'rank' por 'listing_rank' en SELECT
+    // ✅ SOLUCIÓN: Query principal SIN RANK en BD
     const sql = `
       SELECT
         l.listing_id AS id,
@@ -362,7 +358,7 @@ r.get('/', auth(false), async (req, res) => {
         l.bedrooms,
         l.bathrooms,
         l.price_usd AS "priceUSD",
-        COALESCE(l."rank", 90 + random()*10) AS listing_rank,
+        ${(90 + Math.random()*10).toFixed(2)} as rank, -- ✅ RANK EN MEMORIA
         l.location_text AS location,
         l.city,
         l.country,
@@ -396,7 +392,7 @@ r.get('/', auth(false), async (req, res) => {
         name: rows.rows[0].name,
         bedrooms: rows.rows[0].bedrooms,
         priceUSD: rows.rows[0].priceUSD,
-        listing_rank: rows.rows[0].listing_rank
+        rank: rows.rows[0].rank
       });
     }
 
@@ -474,7 +470,7 @@ r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) =>
 });
 
 /************************************************************
- * Helper normalizeResults - CORREGIDO
+ * Helper normalizeResults - SIMPLIFICADO
  ************************************************************/
 function normalizeResults(results) {
   const PLACEHOLDER =
@@ -484,13 +480,9 @@ function normalizeResults(results) {
     const images = Array.isArray(row.images_json) ? row.images_json : [];
     const first = images[0];
 
-    // ✅ FIX: Extraer listing_rank y mapearlo a rank para el frontend
-    const { listing_rank, ...rest } = row;
-
     return {
-      ...rest,
+      ...row,
       id: row.id || `temp-${Math.random().toString(36).slice(2)}`,
-      rank: listing_rank, // Mapear listing_rank de vuelta a rank para el frontend
       images_json: images,
       heroImage:
         (typeof first === 'string' && first) ||
