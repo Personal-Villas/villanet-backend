@@ -155,6 +155,9 @@ r.get('/', async (req, res) => {
     let orderSQL = `ORDER BY updated_at DESC`;
     if (sort === 'price_asc') orderSQL = `ORDER BY price_usd ASC NULLS LAST, updated_at DESC`;
     else if (sort === 'price_desc') orderSQL = `ORDER BY price_usd DESC NULLS LAST, updated_at DESC`;
+    else if (sort === 'rank') {
+      orderSQL = `ORDER BY COALESCE(l."rank", 90 + random()*10) DESC NULLS LAST, updated_at DESC`;
+    }
 
     // Estrategia de disponibilidad (igual que antes)
     if (hasAvailabilityFilter && availabilitySession) {
@@ -172,6 +175,7 @@ r.get('/', async (req, res) => {
               l.bedrooms,
               l.bathrooms, 
               l.price_usd as "priceUSD",
+              COALESCE(l."rank", 90 + random()*10) as rank,
               l.location_text as location,
               l.city, 
               l.country, 
@@ -254,6 +258,7 @@ r.get('/', async (req, res) => {
                 l.bedrooms,
                 l.bathrooms, 
                 l.price_usd as "priceUSD",
+                COALESCE(l."rank", 90 + random()*10) as rank,
                 l.location_text as location,
                 l.city, 
                 l.country, 
@@ -312,6 +317,7 @@ r.get('/', async (req, res) => {
         l.bedrooms,
         l.bathrooms, 
         l.price_usd as "priceUSD",
+        COALESCE(l."rank", 90 + random()*10) as rank,
         l.location_text as location,
         l.city, 
         l.country, 
