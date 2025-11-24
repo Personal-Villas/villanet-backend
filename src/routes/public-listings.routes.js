@@ -74,10 +74,10 @@ r.get('/', async (req, res) => {
       params.push(`%${qNorm}%`);
       const idx = params.length;
       clauses.push(`(
-        LOWER(name) ILIKE $${idx} OR 
-        LOWER(location_text) ILIKE $${idx} OR 
-        LOWER(city) ILIKE $${idx} OR 
-        LOWER(country) ILIKE $${idx}
+        LOWER(l.name) ILIKE $${idx} OR 
+        LOWER(l.location_text) ILIKE $${idx} OR 
+        LOWER(l.city) ILIKE $${idx} OR 
+        LOWER(l.country) ILIKE $${idx}
       )`);
     }
 
@@ -113,10 +113,10 @@ r.get('/', async (req, res) => {
       const parts = [];
       if (nums.length) {
         params.push(nums);
-        parts.push(`bedrooms = ANY($${params.length}::int[])`);
+        parts.push(`l.bedrooms = ANY($${params.length}::int[])`);
       }
-      if (has6plus) parts.push(`bedrooms >= 6`);
-      else if (has5plus) parts.push(`bedrooms >= 5`);
+      if (has6plus) parts.push(`l.bedrooms >= 6`);
+      else if (has5plus) parts.push(`l.bedrooms >= 5`);
       if (parts.length) clauses.push(`(${parts.join(' OR ')})`);
     }
 
@@ -129,38 +129,40 @@ r.get('/', async (req, res) => {
       const parts = [];
       if (nums.length) {
         params.push(nums);
-        parts.push(`bathrooms = ANY($${params.length}::int[])`);
+        parts.push(`l.bathrooms = ANY($${params.length}::int[])`);
       }
-      if (has5plus) parts.push(`bathrooms >= 5`);
+      if (has5plus) parts.push(`l.bathrooms >= 5`);
       if (parts.length) clauses.push(`(${parts.join(' OR ')})`);
     }
 
     // Price
     if (minPrice) {
       params.push(Number(minPrice));
-      clauses.push(`price_usd >= $${params.length}`);
+      clauses.push(`l.price_usd >= $${params.length}`);
     }
     if (maxPrice) {
       params.push(Number(maxPrice));
-      clauses.push(`price_usd <= $${params.length}`);
+      clauses.push(`l.price_usd <= $${params.length}`);
     }
 
     // Filtros base: listadas y con imágenes
-    clauses.push(`is_listed = true`);
-    clauses.push(`(images_json IS NOT NULL AND images_json != '[]'::jsonb)`);
+    clauses.push(`l.is_listed = true`);
+    clauses.push(`(l.images_json IS NOT NULL AND l.images_json != '[]'::jsonb)`);
 
     const whereSQL = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
-    // Ordenamiento
-    let orderSQL = `ORDER BY updated_at DESC`;
-    if (sort === 'price_asc') orderSQL = `ORDER BY price_usd ASC NULLS LAST, updated_at DESC`;
-    else if (sort === 'price_desc') orderSQL = `ORDER BY price_usd DESC NULLS LAST, updated_at DESC`;
-    else if (sort === 'rank') {
-      // ✅ FIX: Usar l."rank" calificado para evitar conflicto con función RANK()
+    // ✅ FIX COMPLETO: Ordenamiento - CALIFICAR TODAS las columnas
+    let orderSQL = `ORDER BY l.updated_at DESC`;
+    if (sort === 'price_asc') {
+      orderSQL = `ORDER BY l.price_usd ASC NULLS LAST, l.updated_at DESC`;
+    } else if (sort === 'price_desc') {
+      orderSQL = `ORDER BY l.price_usd DESC NULLS LAST, l.updated_at DESC`;
+    } else if (sort === 'rank') {
+      // ✅ Usar expresión completa en ORDER BY también
       orderSQL = `ORDER BY COALESCE(l."rank", 90 + random()*10) DESC NULLS LAST, l.updated_at DESC`;
     }
 
-    // Estrategia de disponibilidad (igual que antes)
+    // Estrategia de disponibilidad
     if (hasAvailabilityFilter && availabilitySession) {
       const availableIds = cache.get(availabilitySession);
       
@@ -169,7 +171,9 @@ r.get('/', async (req, res) => {
         const batchIds = availableIds.slice(startIdx, startIdx + lim);
         
         if (batchIds.length > 0) {
-          // ✅ FIX: Cambiado 'rank' por 'listing_rank' en SELECT
+          // ✅ FIX: Cambiar completamente el approach para disponibilidad
+          const placeholders = batchIds.map((_, i) => `$${i + 1}`).join(',');
+          
           let detailsSQL = `
             SELECT 
               l.listing_id as id,
@@ -177,7 +181,7 @@ r.get('/', async (req, res) => {
               l.bedrooms,
               l.bathrooms, 
               l.price_usd as "priceUSD",
-              COALESCE(l."rank", 90 + random()*10) as listing_rank,
+              COALESCE(l."rank", 90 + random()*10) as calculated_rank,
               l.location_text as location,
               l.city, 
               l.country, 
@@ -185,20 +189,25 @@ r.get('/', async (req, res) => {
               COALESCE(l.images_json, '[]'::jsonb) as images_json,  
               l.updated_at
             FROM listings l
-            WHERE l.listing_id = ANY($1)
+            WHERE l.listing_id IN (${placeholders})
           `;
           
           if (badgeIds.length > 0) {
             detailsSQL += ` AND EXISTS (
               SELECT 1 FROM property_badges pb 
               WHERE pb.property_id = l.listing_id 
-              AND pb.badge_id = ANY($2::bigint[])
+              AND pb.badge_id = ANY($${batchIds.length + 1}::bigint[])
             )`;
           }
           
-          detailsSQL += ` ORDER BY array_position($1, l.listing_id)`;
+          // Ordenar por el orden del array original
+          detailsSQL += ` ORDER BY array_position(ARRAY[${placeholders}], l.listing_id)`;
           
-          const queryParams = badgeIds.length > 0 ? [batchIds, badgeIds] : [batchIds];
+          const queryParams = [...batchIds];
+          if (badgeIds.length > 0) {
+            queryParams.push(badgeIds);
+          }
+          
           const detailsResult = await pool.query(detailsSQL, queryParams);
           const results = detailsResult.rows;
           
@@ -229,11 +238,12 @@ r.get('/', async (req, res) => {
       bulkParams.push(bulkFetchLimit);
       bulkParams.push(off);
 
+      // ✅ FIX: Query simplificada solo para IDs
       const bulkSQL = `
         SELECT l.listing_id as id
         FROM listings l
         ${whereSQL}
-        ${orderSQL}
+        ORDER BY l.listing_id
         LIMIT $${bulkParams.length-1} OFFSET $${bulkParams.length};
       `;
 
@@ -253,7 +263,8 @@ r.get('/', async (req, res) => {
           const firstBatchIds = availableIds.slice(0, lim);
           
           if (firstBatchIds.length > 0) {
-            // ✅ FIX: Cambiado 'rank' por 'listing_rank' en SELECT
+            const placeholders = firstBatchIds.map((_, i) => `$${i + 1}`).join(',');
+            
             let detailsSQL = `
               SELECT 
                 l.listing_id as id,
@@ -261,7 +272,7 @@ r.get('/', async (req, res) => {
                 l.bedrooms,
                 l.bathrooms, 
                 l.price_usd as "priceUSD",
-                COALESCE(l."rank", 90 + random()*10) as listing_rank,
+                COALESCE(l."rank", 90 + random()*10) as calculated_rank,
                 l.location_text as location,
                 l.city, 
                 l.country, 
@@ -269,20 +280,24 @@ r.get('/', async (req, res) => {
                 COALESCE(l.images_json, '[]'::jsonb) as images_json,  
                 l.updated_at
               FROM listings l
-              WHERE l.listing_id = ANY($1)
+              WHERE l.listing_id IN (${placeholders})
             `;
             
             if (badgeIds.length > 0) {
               detailsSQL += ` AND EXISTS (
                 SELECT 1 FROM property_badges pb 
                 WHERE pb.property_id = l.listing_id 
-                AND pb.badge_id = ANY($2::bigint[])
+                AND pb.badge_id = ANY($${firstBatchIds.length + 1}::bigint[])
               )`;
             }
             
-            detailsSQL += ` ORDER BY array_position($1, l.listing_id)`;
+            detailsSQL += ` ORDER BY array_position(ARRAY[${placeholders}], l.listing_id)`;
             
-            const queryParams = badgeIds.length > 0 ? [firstBatchIds, badgeIds] : [firstBatchIds];
+            const queryParams = [...firstBatchIds];
+            if (badgeIds.length > 0) {
+              queryParams.push(badgeIds);
+            }
+            
             const detailsResult = await pool.query(detailsSQL, queryParams);
             const results = detailsResult.rows;
             
@@ -304,16 +319,17 @@ r.get('/', async (req, res) => {
           }
         } catch (err) {
           console.error('[Public API] Availability check failed:', err);
+          // Continuar con query normal si falla disponibilidad
         }
       }
     }
 
-    // Estrategia estándar
+    // ✅ FIX COMPLETO: Estrategia estándar - Query principal
     const standardParams = [...params];
     standardParams.push(lim);
     standardParams.push(off);
 
-    // ✅ FIX: Cambiado 'rank' por 'listing_rank' en SELECT
+    // Query principal completamente corregida
     const sql = `
       SELECT 
         l.listing_id as id,
@@ -321,7 +337,7 @@ r.get('/', async (req, res) => {
         l.bedrooms,
         l.bathrooms, 
         l.price_usd as "priceUSD",
-        COALESCE(l."rank", 90 + random()*10) as listing_rank,
+        COALESCE(l."rank", 90 + random()*10) as calculated_rank,
         l.location_text as location,
         l.city, 
         l.country, 
@@ -334,15 +350,18 @@ r.get('/', async (req, res) => {
       LIMIT $${standardParams.length-1} OFFSET $${standardParams.length};
     `;
 
+    // ✅ FIX: Count query también calificada
     const countSQL = `
       SELECT COUNT(*)::int AS total
       FROM listings l
       ${whereSQL};
     `;
 
+    console.log('🔍 Executing main query with order:', orderSQL);
+
     const [rowsResult, countResult] = await Promise.all([
       pool.query(sql, standardParams),
-      pool.query(countSQL, standardParams.slice(0, standardParams.length - 2))
+      pool.query(countSQL, params) // ✅ Usar params originales sin limit/offset
     ]);
 
     const results = rowsResult.rows;
@@ -367,7 +386,12 @@ r.get('/', async (req, res) => {
     res.json(response);
   } catch (err) {
     console.error('[Public API] Listings error:', err);
-    res.status(500).json({ message: err.message || 'Error fetching listings' });
+    console.error('Error details:', {
+      message: err.message,
+      code: err.code,
+      position: err.position
+    });
+    res.status(500).json({ message: 'Error fetching listings' });
   }
 });
 
@@ -421,7 +445,7 @@ r.get('/:id', async (req, res) => {
   }
 });
 
-// ✅ FIX: Función normalizeResults actualizada para mapear listing_rank a rank
+// ✅ FIX: Función normalizeResults actualizada
 function normalizeResults(results) {
   const PLACEHOLDER = 'https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200&q=80&auto=format&fit=crop';
   
@@ -429,13 +453,13 @@ function normalizeResults(results) {
     const images = Array.isArray(item.images_json) ? item.images_json : [];
     const first = images[0];
     
-    // ✅ FIX: Extraer listing_rank y mapearlo a rank para mantener compatibilidad con frontend
-    const { listing_rank, ...rest } = item;
+    // ✅ Extraer calculated_rank y mapearlo a rank
+    const { calculated_rank, ...rest } = item;
     
     return {
       ...rest,
       id: item.id || `temp-${Math.random().toString(36).slice(2)}`,
-      rank: listing_rank, // Mapear listing_rank de vuelta a rank para el frontend
+      rank: calculated_rank, // Mapear para frontend
       images_json: images,
       heroImage: (typeof first === 'string' && first) || item.heroImage || PLACEHOLDER,
     };
