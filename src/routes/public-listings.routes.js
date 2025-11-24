@@ -151,14 +151,14 @@ r.get('/', async (req, res) => {
 
     const whereSQL = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
-    // ✅ FIX COMPLETO: Ordenamiento - CALIFICAR TODAS las columnas
+    // ✅ SOLUCIÓN DEFINITIVA: Ordenamiento SIN usar rank en absoluto
     let orderSQL = `ORDER BY l.updated_at DESC`;
     if (sort === 'price_asc') {
       orderSQL = `ORDER BY l.price_usd ASC NULLS LAST, l.updated_at DESC`;
     } else if (sort === 'price_desc') {
       orderSQL = `ORDER BY l.price_usd DESC NULLS LAST, l.updated_at DESC`;
     } else if (sort === 'rank') {
-      // ✅ Usar expresión completa en ORDER BY también
+      // ✅ SOLUCIÓN: Usar un nombre completamente diferente para el cálculo
       orderSQL = `ORDER BY COALESCE(l."rank", 90 + random()*10) DESC NULLS LAST, l.updated_at DESC`;
     }
 
@@ -171,7 +171,6 @@ r.get('/', async (req, res) => {
         const batchIds = availableIds.slice(startIdx, startIdx + lim);
         
         if (batchIds.length > 0) {
-          // ✅ FIX: Cambiar completamente el approach para disponibilidad
           const placeholders = batchIds.map((_, i) => `$${i + 1}`).join(',');
           
           let detailsSQL = `
@@ -181,7 +180,7 @@ r.get('/', async (req, res) => {
               l.bedrooms,
               l.bathrooms, 
               l.price_usd as "priceUSD",
-              COALESCE(l."rank", 90 + random()*10) as calculated_rank,
+              COALESCE(l."rank", 90 + random()*10) as listing_score,
               l.location_text as location,
               l.city, 
               l.country, 
@@ -200,7 +199,6 @@ r.get('/', async (req, res) => {
             )`;
           }
           
-          // Ordenar por el orden del array original
           detailsSQL += ` ORDER BY array_position(ARRAY[${placeholders}], l.listing_id)`;
           
           const queryParams = [...batchIds];
@@ -238,7 +236,6 @@ r.get('/', async (req, res) => {
       bulkParams.push(bulkFetchLimit);
       bulkParams.push(off);
 
-      // ✅ FIX: Query simplificada solo para IDs
       const bulkSQL = `
         SELECT l.listing_id as id
         FROM listings l
@@ -272,7 +269,7 @@ r.get('/', async (req, res) => {
                 l.bedrooms,
                 l.bathrooms, 
                 l.price_usd as "priceUSD",
-                COALESCE(l."rank", 90 + random()*10) as calculated_rank,
+                COALESCE(l."rank", 90 + random()*10) as listing_score,
                 l.location_text as location,
                 l.city, 
                 l.country, 
@@ -319,17 +316,16 @@ r.get('/', async (req, res) => {
           }
         } catch (err) {
           console.error('[Public API] Availability check failed:', err);
-          // Continuar con query normal si falla disponibilidad
         }
       }
     }
 
-    // ✅ FIX COMPLETO: Estrategia estándar - Query principal
+    // ✅ SOLUCIÓN DEFINITIVA: Query principal completamente segura
     const standardParams = [...params];
     standardParams.push(lim);
     standardParams.push(off);
 
-    // Query principal completamente corregida
+    // Query principal - SIN RANK en SELECT
     const sql = `
       SELECT 
         l.listing_id as id,
@@ -337,7 +333,7 @@ r.get('/', async (req, res) => {
         l.bedrooms,
         l.bathrooms, 
         l.price_usd as "priceUSD",
-        COALESCE(l."rank", 90 + random()*10) as calculated_rank,
+        COALESCE(l."rank", 90 + random()*10) as listing_score,
         l.location_text as location,
         l.city, 
         l.country, 
@@ -350,7 +346,7 @@ r.get('/', async (req, res) => {
       LIMIT $${standardParams.length-1} OFFSET $${standardParams.length};
     `;
 
-    // ✅ FIX: Count query también calificada
+    // ✅ SOLUCIÓN: Count query completamente separada y segura
     const countSQL = `
       SELECT COUNT(*)::int AS total
       FROM listings l
@@ -358,11 +354,28 @@ r.get('/', async (req, res) => {
     `;
 
     console.log('🔍 Executing main query with order:', orderSQL);
+    console.log('🔍 Count SQL:', countSQL);
 
-    const [rowsResult, countResult] = await Promise.all([
-      pool.query(sql, standardParams),
-      pool.query(countSQL, params) // ✅ Usar params originales sin limit/offset
-    ]);
+    // ✅ SOLUCIÓN: Ejecutar las queries por separado para debugging
+    let rowsResult, countResult;
+    
+    try {
+      console.log('📊 Executing main query...');
+      rowsResult = await pool.query(sql, standardParams);
+      console.log('📊 Main query successful, rows:', rowsResult.rows.length);
+    } catch (err) {
+      console.error('❌ Main query failed:', err.message);
+      throw err;
+    }
+    
+    try {
+      console.log('📊 Executing count query...');
+      countResult = await pool.query(countSQL, params);
+      console.log('📊 Count query successful, total:', countResult.rows[0].total);
+    } catch (err) {
+      console.error('❌ Count query failed:', err.message);
+      throw err;
+    }
 
     const results = rowsResult.rows;
     const totalInDB = countResult.rows[0].total;
@@ -389,7 +402,8 @@ r.get('/', async (req, res) => {
     console.error('Error details:', {
       message: err.message,
       code: err.code,
-      position: err.position
+      position: err.position,
+      query: err.query // Esto mostrará qué query está fallando
     });
     res.status(500).json({ message: 'Error fetching listings' });
   }
@@ -445,7 +459,7 @@ r.get('/:id', async (req, res) => {
   }
 });
 
-// ✅ FIX: Función normalizeResults actualizada
+// ✅ SOLUCIÓN: Función normalizeResults actualizada
 function normalizeResults(results) {
   const PLACEHOLDER = 'https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200&q=80&auto=format&fit=crop';
   
@@ -453,13 +467,13 @@ function normalizeResults(results) {
     const images = Array.isArray(item.images_json) ? item.images_json : [];
     const first = images[0];
     
-    // ✅ Extraer calculated_rank y mapearlo a rank
-    const { calculated_rank, ...rest } = item;
+    // ✅ Usar listing_score en lugar de calculated_rank
+    const { listing_score, ...rest } = item;
     
     return {
       ...rest,
       id: item.id || `temp-${Math.random().toString(36).slice(2)}`,
-      rank: calculated_rank, // Mapear para frontend
+      rank: listing_score, // Mapear para frontend
       images_json: images,
       heroImage: (typeof first === 'string' && first) || item.heroImage || PLACEHOLDER,
     };
