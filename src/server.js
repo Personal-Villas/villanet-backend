@@ -1,4 +1,4 @@
-/*import express from 'express';
+import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
@@ -29,7 +29,6 @@ app.use(
       'http://localhost:3000',
       'http://localhost:4000',
       'https://villanet-frontend.onrender.com',
-      
     ],
     credentials: true,
   })
@@ -50,72 +49,6 @@ app.use('/availability', availabilityRoutes);
 app.use('/properties', propertyBadgesRoutes);
 app.use('/admin/properties', adminPropertiesRoutes);
 app.use('/booking', bookingRoutes);
-app.use((req, res) => {
-  res.status(404).json({ error: 'Not found', path: req.originalUrl });
-});
-
-const port = Number(process.env.PORT || 4000);
-app.listen(port, () => console.log(`✅ API listening on :${port}`));*/
-import express from 'express';
-import cors from 'cors';
-import cookieParser from 'cookie-parser';
-import helmet from 'helmet';
-import 'dotenv/config';
-
-import authRoutes from './routes/auth.routes.js';
-import adminRoutes from './routes/admin.routes.js';
-import listingsRoutes from './routes/listings.routes.js';
-import publicListingsRoutes from './routes/public-listings.routes.js';
-import pmcRoutes from './routes/pmc.routes.js';
-import availabilityRoutes from './routes/availability.routes.js';
-import badgesRoutes from './routes/badges.routes.js';
-import propertyBadgesRoutes from './routes/property-badges.routes.js';
-import adminPropertiesRoutes from './routes/admin.properties.routes.js';
-import bookingRoutes from './routes/booking.routes.js';
-
-const app = express();
-
-app.set('trust proxy', 1);
-
-// Configuración CORS más robusta
-const corsOptions = {
-  origin: [
-    'http://localhost:3000',
-    'http://localhost:4000',
-    'https://villanet-frontend.onrender.com',
-  ],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'Set-Cookie'],
-  exposedHeaders: ['Set-Cookie'],
-  optionsSuccessStatus: 200
-};
-
-// Aplica CORS GLOBALMENTE para todas las rutas
-app.use(cors(corsOptions));
-app.use(helmet());
-app.use(express.json());
-app.use(cookieParser());
-
-// Manejar preflight OPTIONS requests globalmente
-app.options('*', cors(corsOptions));
-
-app.get('/health', (_req, res) => res.json({ ok: true }));
-
-// 🆕 Rutas PÚBLICAS primero (sin autenticación)
-app.use('/public/listings', publicListingsRoutes);
-app.use('/badges', badgesRoutes);
-
-// Rutas protegidas
-app.use('/auth', authRoutes);
-app.use('/admin', adminRoutes);
-app.use('/listings', listingsRoutes);
-app.use('/pmc', pmcRoutes);
-app.use('/availability', availabilityRoutes);
-app.use('/properties', propertyBadgesRoutes);
-app.use('/admin/properties', adminPropertiesRoutes);
-app.use('/booking', bookingRoutes);
-
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found', path: req.originalUrl });
 });
