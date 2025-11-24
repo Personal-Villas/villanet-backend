@@ -180,7 +180,7 @@ r.get('/', auth(false), async (req, res) => {
       // ⚠️ NOTA: Este random() hace que cada query devuelva orden diferente
       // Para producción, remover random() y usar solo l.rank
       orderSQL = `
-        ORDER BY COALESCE(l.rank, 90 + random()*10) DESC NULLS LAST,
+        ORDER BY COALESCE(l."rank", 90 + random()*10) DESC NULLS LAST,
                  l.updated_at DESC
       `;
     } else if (sort === 'price-low') {
@@ -250,7 +250,7 @@ r.get('/', auth(false), async (req, res) => {
           l.bedrooms,
           l.bathrooms,
           l.price_usd AS "priceUSD",
-          COALESCE(l.rank, 90 + random()*10) AS rank,
+          COALESCE(l."rank", 90 + random()*10) AS rank,
           l.location_text AS location,
           l.city,
           l.country,
@@ -319,7 +319,7 @@ r.get('/', auth(false), async (req, res) => {
           l.bedrooms,
           l.bathrooms,
           l.price_usd AS "priceUSD",
-          COALESCE(l.rank, 90 + random()*10) AS rank,
+          COALESCE(l."rank", 90 + random()*10) AS rank,
           l.location_text AS location,
           l.city,
           l.country,
@@ -361,7 +361,7 @@ r.get('/', auth(false), async (req, res) => {
         l.bedrooms,
         l.bathrooms,
         l.price_usd AS "priceUSD",
-        COALESCE(l.rank, 90 + random()*10) AS rank,
+        COALESCE(l."rank", 90 + random()*10) AS rank,
         l.location_text AS location,
         l.city,
         l.country,
