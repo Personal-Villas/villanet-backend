@@ -38,6 +38,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 
 // 🆕 Rutas PÚBLICAS primero (sin autenticación)
 app.use('/public/listings', publicListingsRoutes);
+app.use('/badges', badgesRoutes);
 
 // Rutas protegidas
 app.use('/auth', authRoutes);
@@ -45,7 +46,6 @@ app.use('/admin', adminRoutes);
 app.use('/listings', listingsRoutes);
 app.use('/pmc', pmcRoutes);
 app.use('/availability', availabilityRoutes);
-app.use('/badges', badgesRoutes);
 app.use('/properties', propertyBadgesRoutes);
 app.use('/admin/properties', adminPropertiesRoutes);
 app.use('/booking', bookingRoutes);

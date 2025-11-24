@@ -6,7 +6,7 @@ import { requireRole } from '../middleware/requireRole.js';
 const r = Router();
 
 // GET /badges  => { categories:[], badges:[] }
-r.get('/', auth(true), async (_req, res) => {
+r.get('/', auth(false), async (_req, res) => {
   const { rows: cats } = await pool.query(
     `SELECT slug, name, sort_order FROM badge_categories ORDER BY sort_order ASC`
   );
