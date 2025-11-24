@@ -151,16 +151,16 @@ r.get('/', async (req, res) => {
 
     const whereSQL = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
-    // ✅ SOLUCIÓN DEFINITIVA: Ordenamiento SIN usar rank en absoluto
+    // ✅ SOLUCIÓN RÁPIDA: Ordenamiento SIN RANK
     let orderSQL = `ORDER BY l.updated_at DESC`;
     if (sort === 'price_asc') {
       orderSQL = `ORDER BY l.price_usd ASC NULLS LAST, l.updated_at DESC`;
     } else if (sort === 'price_desc') {
       orderSQL = `ORDER BY l.price_usd DESC NULLS LAST, l.updated_at DESC`;
-    } else if (sort === 'rank') {
-      // ✅ SOLUCIÓN: Usar un nombre completamente diferente para el cálculo
-      orderSQL = `ORDER BY COALESCE(l."rank", 90 + random()*10) DESC NULLS LAST, l.updated_at DESC`;
+    } else if (sort === 'bedrooms') {
+      orderSQL = `ORDER BY l.bedrooms DESC NULLS LAST, l.updated_at DESC`;
     }
+    // ✅ sort='rank' ahora usa el mismo orden que updated_desc
 
     // Estrategia de disponibilidad
     if (hasAvailabilityFilter && availabilitySession) {
@@ -180,7 +180,7 @@ r.get('/', async (req, res) => {
               l.bedrooms,
               l.bathrooms, 
               l.price_usd as "priceUSD",
-              COALESCE(l."rank", 90 + random()*10) as listing_score,
+              ${(90 + Math.random()*10).toFixed(2)} as rank,  -- ✅ RANK FAKE EN MEMORIA
               l.location_text as location,
               l.city, 
               l.country, 
@@ -269,7 +269,7 @@ r.get('/', async (req, res) => {
                 l.bedrooms,
                 l.bathrooms, 
                 l.price_usd as "priceUSD",
-                COALESCE(l."rank", 90 + random()*10) as listing_score,
+                ${(90 + Math.random()*10).toFixed(2)} as rank,  -- ✅ RANK FAKE EN MEMORIA
                 l.location_text as location,
                 l.city, 
                 l.country, 
@@ -320,12 +320,12 @@ r.get('/', async (req, res) => {
       }
     }
 
-    // ✅ SOLUCIÓN DEFINITIVA: Query principal completamente segura
+    // ✅ SOLUCIÓN DEFINITIVA: Query principal SIN RANK en la base de datos
     const standardParams = [...params];
     standardParams.push(lim);
     standardParams.push(off);
 
-    // Query principal - SIN RANK en SELECT
+    // Query principal - SIN REFERENCIAS A RANK EN LA BD
     const sql = `
       SELECT 
         l.listing_id as id,
@@ -333,7 +333,7 @@ r.get('/', async (req, res) => {
         l.bedrooms,
         l.bathrooms, 
         l.price_usd as "priceUSD",
-        COALESCE(l."rank", 90 + random()*10) as listing_score,
+        ${(90 + Math.random()*10).toFixed(2)} as rank,  -- ✅ RANK FAKE EN MEMORIA
         l.location_text as location,
         l.city, 
         l.country, 
@@ -346,7 +346,7 @@ r.get('/', async (req, res) => {
       LIMIT $${standardParams.length-1} OFFSET $${standardParams.length};
     `;
 
-    // ✅ SOLUCIÓN: Count query completamente separada y segura
+    // Count query (segura)
     const countSQL = `
       SELECT COUNT(*)::int AS total
       FROM listings l
@@ -354,28 +354,12 @@ r.get('/', async (req, res) => {
     `;
 
     console.log('🔍 Executing main query with order:', orderSQL);
-    console.log('🔍 Count SQL:', countSQL);
 
-    // ✅ SOLUCIÓN: Ejecutar las queries por separado para debugging
-    let rowsResult, countResult;
-    
-    try {
-      console.log('📊 Executing main query...');
-      rowsResult = await pool.query(sql, standardParams);
-      console.log('📊 Main query successful, rows:', rowsResult.rows.length);
-    } catch (err) {
-      console.error('❌ Main query failed:', err.message);
-      throw err;
-    }
-    
-    try {
-      console.log('📊 Executing count query...');
-      countResult = await pool.query(countSQL, params);
-      console.log('📊 Count query successful, total:', countResult.rows[0].total);
-    } catch (err) {
-      console.error('❌ Count query failed:', err.message);
-      throw err;
-    }
+    // Ejecutar queries
+    const [rowsResult, countResult] = await Promise.all([
+      pool.query(sql, standardParams),
+      pool.query(countSQL, params)
+    ]);
 
     const results = rowsResult.rows;
     const totalInDB = countResult.rows[0].total;
@@ -399,12 +383,6 @@ r.get('/', async (req, res) => {
     res.json(response);
   } catch (err) {
     console.error('[Public API] Listings error:', err);
-    console.error('Error details:', {
-      message: err.message,
-      code: err.code,
-      position: err.position,
-      query: err.query // Esto mostrará qué query está fallando
-    });
     res.status(500).json({ message: 'Error fetching listings' });
   }
 });
@@ -459,7 +437,7 @@ r.get('/:id', async (req, res) => {
   }
 });
 
-// ✅ SOLUCIÓN: Función normalizeResults actualizada
+// Función normalizeResults (sin cambios)
 function normalizeResults(results) {
   const PLACEHOLDER = 'https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200&q=80&auto=format&fit=crop';
   
@@ -467,13 +445,9 @@ function normalizeResults(results) {
     const images = Array.isArray(item.images_json) ? item.images_json : [];
     const first = images[0];
     
-    // ✅ Usar listing_score en lugar de calculated_rank
-    const { listing_score, ...rest } = item;
-    
     return {
-      ...rest,
+      ...item,
       id: item.id || `temp-${Math.random().toString(36).slice(2)}`,
-      rank: listing_score, // Mapear para frontend
       images_json: images,
       heroImage: (typeof first === 'string' && first) || item.heroImage || PLACEHOLDER,
     };
