@@ -14,6 +14,7 @@ import badgesRoutes from './routes/badges.routes.js';
 import propertyBadgesRoutes from './routes/property-badges.routes.js';
 import adminPropertiesRoutes from './routes/admin.properties.routes.js';
 import bookingRoutes from './routes/booking.routes.js';
+import advisorsRoutes from './routes/advisors.routes.js';
 
 const app = express();
 
@@ -39,6 +40,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 // 🆕 Rutas PÚBLICAS primero (sin autenticación)
 app.use('/public/listings', publicListingsRoutes);
 app.use('/badges', badgesRoutes);
+app.use('/advisors', advisorsRoutes);
 
 // Rutas protegidas
 app.use('/auth', authRoutes);
