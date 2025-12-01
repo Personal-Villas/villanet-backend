@@ -7,7 +7,7 @@ import 'dotenv/config';
 import authRoutes from './routes/auth.routes.js';
 import adminRoutes from './routes/admin.routes.js';
 import listingsRoutes from './routes/listings.routes.js';
-import publicListingsRoutes from './routes/public-listings.routes.js'; // 🆕 NUEVO
+import publicListingsRoutes from './routes/public-listings.routes.js'; 
 import pmcRoutes from './routes/pmc.routes.js';
 import availabilityRoutes from './routes/availability.routes.js';
 import badgesRoutes from './routes/badges.routes.js';
@@ -16,6 +16,7 @@ import adminPropertiesRoutes from './routes/admin.properties.routes.js';
 import bookingRoutes from './routes/booking.routes.js';
 import advisorsRoutes from './routes/advisors.routes.js';
 import propertyManagersRoutes from './routes/propertyManagers.routes.js';
+import publicMessagesRouter from './routes/public-messages.routes.js';
 
 const app = express();
 
@@ -39,10 +40,12 @@ app.use(
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 // 🆕 Rutas PÚBLICAS primero (sin autenticación)
+app.use('/public', publicMessagesRouter);
 app.use('/public/listings', publicListingsRoutes);
 app.use('/badges', badgesRoutes);
 app.use('/advisors', advisorsRoutes);
 app.use('/property-managers', propertyManagersRoutes);
+
 
 // Rutas protegidas
 app.use('/auth', authRoutes);
