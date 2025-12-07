@@ -29,7 +29,8 @@ r.get('/', async (req, res) => {
       offset = '0',
       sort = 'updated_desc',
       availabilitySession = '',
-      availabilityCursor = '0'
+      availabilityCursor = '0',
+      destination = '' // 🔥 Filtro por destination tag
     } = req.query;
 
     const lim = Math.min(Math.max(parseInt(String(limit), 10) || 24, 1), 100);
@@ -58,49 +59,92 @@ r.get('/', async (req, res) => {
       checkIn: checkIn || '',
       checkOut: checkOut || '',
       badges: badges.split(',').filter(Boolean).sort().join(','),
+      destination: destination || '',
       limit,
       offset,
       sort
     };
     const cacheKey = `public:listings:${JSON.stringify(normalizedQuery)}`;
 
+    // 🔥 Mapeo dinámico de badges a campos VillaNet (se generará automáticamente)
+    // Primero obtengamos los campos booleanos existentes de VillaNet
+    const { rows: villaNetBooleanFields } = await pool.query(`
+      SELECT column_name
+      FROM information_schema.columns 
+      WHERE table_name = 'listings' 
+        AND table_schema = 'public'
+        AND column_name LIKE 'villanet_%'
+        AND data_type = 'boolean'
+      ORDER BY column_name;
+    `);
+
+    // 🔥 Crear mapeo dinámico de slugs a campos
+    const VILLANET_BADGE_FIELD_MAP = {};
+    villaNetBooleanFields.forEach(field => {
+      const fieldName = field.column_name;
+      // Convertir villanet_chef_included -> chef-included
+      const slug = fieldName.replace('villanet_', '').replace(/_/g, '-');
+      VILLANET_BADGE_FIELD_MAP[slug] = fieldName;
+    });
+
+    console.log('[Public API] Dynamic VillaNet badge map:', VILLANET_BADGE_FIELD_MAP);
+
     // Construcción de filtros SQL
     const clauses = [];
     const params = [];
 
-    // Búsqueda por texto
-    const qNorm = q.trim().toLowerCase();
-    if (qNorm.length >= 3) {
-      params.push(`%${qNorm}%`);
+    // 🔥 BÚSQUEDA UNIFICADA: destination + q buscan en los mismos campos
+    let searchTerm = '';
+    
+    // Prioridad: destination primero, luego q
+    if (destination?.toString().trim()) {
+      searchTerm = destination.toString().trim();
+    } else if (q?.toString().trim()) {
+      searchTerm = q.toString().trim();
+    }
+    
+    // Si hay término de búsqueda (de cualquiera de las dos fuentes)
+    if (searchTerm) {
+      const searchLower = `%${searchTerm.toLowerCase()}%`;
+      params.push(searchLower);
       const idx = params.length;
+      
+      // 🔥 BUSCAR EN TODOS LOS CAMPOS RELEVANTES
       clauses.push(`(
         LOWER(l.name) ILIKE $${idx} OR 
-        LOWER(l.location_text) ILIKE $${idx} OR 
-        LOWER(l.city) ILIKE $${idx} OR 
-        LOWER(l.country) ILIKE $${idx}
+        LOWER(l.villanet_destination_tag) ILIKE $${idx} OR 
+        LOWER(l.villanet_city) ILIKE $${idx} OR
+        LOWER(l.city) ILIKE $${idx} OR
+        LOWER(l.country) ILIKE $${idx} OR
+        LOWER(l.location_text) ILIKE $${idx} OR
+        LOWER(l.description) ILIKE $${idx}
       )`);
     }
 
-    // Convertir slugs de badges a IDs
+    // 🔥 FILTRO POR BADGES VILLANET (CAMPOS BOOLEANOS)
     const badgeSlugs = badges.split(',').filter(Boolean);
-    let badgeIds = [];
     
     if (badgeSlugs.length > 0) {
-      const badgeQuery = await pool.query(
-        `SELECT id FROM badges WHERE slug = ANY($1::text[])`,
-        [badgeSlugs]
-      );
-      badgeIds = badgeQuery.rows.map(row => row.id);
-    }
-
-    // Filtro por badges
-    if (badgeIds.length > 0) {
-      params.push(badgeIds);
-      clauses.push(`EXISTS (
-        SELECT 1 FROM property_badges pb 
-        WHERE pb.property_id = l.listing_id 
-        AND pb.badge_id = ANY($${params.length}::bigint[])
-      )`);
+      console.log('[Public API] Filtering by VillaNet badges:', badgeSlugs);
+      
+      // Verificar que todos los slugs sean válidos
+      const validSlugs = badgeSlugs.filter(slug => VILLANET_BADGE_FIELD_MAP[slug]);
+      
+      if (validSlugs.length > 0) {
+        // Agregar condición para cada badge VillaNet seleccionado
+        validSlugs.forEach(slug => {
+          const fieldName = VILLANET_BADGE_FIELD_MAP[slug];
+          clauses.push(`l.${fieldName} = true`);
+        });
+        
+        console.log('[Public API] Applied VillaNet badge filters:', {
+          requested: badgeSlugs,
+          valid: validSlugs,
+          fields: validSlugs.map(slug => VILLANET_BADGE_FIELD_MAP[slug])
+        });
+      } else {
+        console.log('[Public API] No valid VillaNet badges found for:', badgeSlugs);
+      }
     }
 
     // Bedrooms
@@ -108,15 +152,13 @@ r.get('/', async (req, res) => {
     if (bedroomsList.length) {
       const nums = bedroomsList.filter(v => /^\d+$/.test(v)).map(Number);
       const has5plus = bedroomsList.includes('5+');
-      const has6plus = bedroomsList.includes('6+');
 
       const parts = [];
       if (nums.length) {
         params.push(nums);
         parts.push(`l.bedrooms = ANY($${params.length}::int[])`);
       }
-      if (has6plus) parts.push(`l.bedrooms >= 6`);
-      else if (has5plus) parts.push(`l.bedrooms >= 5`);
+      if (has5plus) parts.push(`l.bedrooms >= 5`);
       if (parts.length) clauses.push(`(${parts.join(' OR ')})`);
     }
 
@@ -145,22 +187,26 @@ r.get('/', async (req, res) => {
       clauses.push(`l.price_usd <= $${params.length}`);
     }
 
-    // Filtros base: listadas y con imágenes
+    // Filtros base VillaNet
     clauses.push(`l.is_listed = true`);
+    clauses.push(`l.villanet_enabled = true`);
     clauses.push(`(l.images_json IS NOT NULL AND l.images_json != '[]'::jsonb)`);
 
     const whereSQL = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
-    // ✅ SOLUCIÓN RÁPIDA: Ordenamiento SIN RANK
+    // 🔥 ORDENAMIENTO CORREGIDO - SOLO villanet_rank real
     let orderSQL = `ORDER BY l.updated_at DESC`;
-    if (sort === 'price_asc') {
+
+    if (sort === 'price_low') {
       orderSQL = `ORDER BY l.price_usd ASC NULLS LAST, l.updated_at DESC`;
-    } else if (sort === 'price_desc') {
+    } else if (sort === 'price_high') {
       orderSQL = `ORDER BY l.price_usd DESC NULLS LAST, l.updated_at DESC`;
     } else if (sort === 'bedrooms') {
       orderSQL = `ORDER BY l.bedrooms DESC NULLS LAST, l.updated_at DESC`;
+    } else if (sort === 'rank') {
+      // 🔥 Usa EXACTAMENTE villanet_rank de la BD, sin modificaciones
+      orderSQL = `ORDER BY l.villanet_rank DESC NULLS LAST, l.updated_at DESC`;
     }
-    // ✅ sort='rank' ahora usa el mismo orden que updated_desc
 
     // Estrategia de disponibilidad
     if (hasAvailabilityFilter && availabilitySession) {
@@ -180,8 +226,39 @@ r.get('/', async (req, res) => {
               l.bedrooms,
               l.bathrooms, 
               l.price_usd as "priceUSD",
-              ${(90 + Math.random()*10).toFixed(2)} as rank,  -- ✅ RANK FAKE EN MEMORIA
-              l.location_text as location,
+
+              -- 🔥 Rank REAL de la BD - SIN FALLBACK
+              l.villanet_rank as rank,
+
+              -- Ubicación "bonita" VillaNet primero
+              COALESCE(l.villanet_destination_tag, l.villanet_city, l.location_text) as location,
+
+              -- Campos VillaNet extra
+              l.villanet_destination_tag as "villaNetDestinationTag",
+              l.villanet_city as "villaNetCity",
+              l.villanet_property_manager_name as "villaNetPropertyManagerName",
+              l.villanet_commission_rate as "villaNetCommissionRate",
+
+              -- 🔥 NUEVOS CAMPOS BOOLEANOS DE VILLANET
+              l.villanet_gated_community as "villanetGatedCommunity",
+              l.villanet_golf_villa as "villanetGolfVilla",
+              l.villanet_resort_villa as "villanetResortVilla",
+              l.villanet_resort_collection_name as "villanetResortCollectionName",
+              l.villanet_chef_included as "villanetChefIncluded",
+              l.villanet_true_beach_front as "villanetTrueBeachFront",
+              l.villanet_cook_included as "villanetCookIncluded",
+              l.villanet_waiter_butler_included as "villanetWaiterButlerIncluded",
+              l.villanet_ocean_front as "villanetOceanFront",
+              l.villanet_ocean_view as "villanetOceanView",
+              l.villanet_walk_to_beach as "villanetWalkToBeach",
+              l.villanet_accessible as "villanetAccessible",
+              l.villanet_private_gym as "villanetPrivateGym",
+              l.villanet_private_cinema as "villanetPrivateCinema",
+              l.villanet_pickleball as "villanetPickleball",
+              l.villanet_tennis as "villanetTennis",
+              l.villanet_golf_cart_included as "villanetGolfCartIncluded",
+              l.villanet_heated_pool as "villanetHeatedPool",
+
               l.city, 
               l.country, 
               COALESCE(l.hero_image_url, '') as "heroImage",
@@ -191,20 +268,18 @@ r.get('/', async (req, res) => {
             WHERE l.listing_id IN (${placeholders})
           `;
           
-          if (badgeIds.length > 0) {
-            detailsSQL += ` AND EXISTS (
-              SELECT 1 FROM property_badges pb 
-              WHERE pb.property_id = l.listing_id 
-              AND pb.badge_id = ANY($${batchIds.length + 1}::bigint[])
-            )`;
+          // Agregar filtros VillaNet si hay badges seleccionados
+          if (badgeSlugs.length > 0) {
+            const validSlugs = badgeSlugs.filter(slug => VILLANET_BADGE_FIELD_MAP[slug]);
+            validSlugs.forEach(slug => {
+              const fieldName = VILLANET_BADGE_FIELD_MAP[slug];
+              detailsSQL += ` AND l.${fieldName} = true`;
+            });
           }
           
           detailsSQL += ` ORDER BY array_position(ARRAY[${placeholders}], l.listing_id)`;
           
           const queryParams = [...batchIds];
-          if (badgeIds.length > 0) {
-            queryParams.push(badgeIds);
-          }
           
           const detailsResult = await pool.query(detailsSQL, queryParams);
           const results = detailsResult.rows;
@@ -269,8 +344,39 @@ r.get('/', async (req, res) => {
                 l.bedrooms,
                 l.bathrooms, 
                 l.price_usd as "priceUSD",
-                ${(90 + Math.random()*10).toFixed(2)} as rank,  -- ✅ RANK FAKE EN MEMORIA
-                l.location_text as location,
+
+                -- 🔥 Rank REAL de la BD - SIN FALLBACK
+                l.villanet_rank as rank,
+
+                -- Ubicación "bonita" VillaNet primero
+                COALESCE(l.villanet_destination_tag, l.villanet_city, l.location_text) as location,
+
+                -- Campos VillaNet extra
+                l.villanet_destination_tag as "villaNetDestinationTag",
+                l.villanet_city as "villaNetCity",
+                l.villanet_property_manager_name as "villaNetPropertyManagerName",
+                l.villanet_commission_rate as "villaNetCommissionRate",
+
+                -- 🔥 NUEVOS CAMPOS BOOLEANOS DE VILLANET
+                l.villanet_gated_community as "villanetGatedCommunity",
+                l.villanet_golf_villa as "villanetGolfVilla",
+                l.villanet_resort_villa as "villanetResortVilla",
+                l.villanet_resort_collection_name as "villanetResortCollectionName",
+                l.villanet_chef_included as "villanetChefIncluded",
+                l.villanet_true_beach_front as "villanetTrueBeachFront",
+                l.villanet_cook_included as "villanetCookIncluded",
+                l.villanet_waiter_butler_included as "villanetWaiterButlerIncluded",
+                l.villanet_ocean_front as "villanetOceanFront",
+                l.villanet_ocean_view as "villanetOceanView",
+                l.villanet_walk_to_beach as "villanetWalkToBeach",
+                l.villanet_accessible as "villanetAccessible",
+                l.villanet_private_gym as "villanetPrivateGym",
+                l.villanet_private_cinema as "villanetPrivateCinema",
+                l.villanet_pickleball as "villanetPickleball",
+                l.villanet_tennis as "villanetTennis",
+                l.villanet_golf_cart_included as "villanetGolfCartIncluded",
+                l.villanet_heated_pool as "villanetHeatedPool",
+
                 l.city, 
                 l.country, 
                 COALESCE(l.hero_image_url, '') as "heroImage",
@@ -280,20 +386,18 @@ r.get('/', async (req, res) => {
               WHERE l.listing_id IN (${placeholders})
             `;
             
-            if (badgeIds.length > 0) {
-              detailsSQL += ` AND EXISTS (
-                SELECT 1 FROM property_badges pb 
-                WHERE pb.property_id = l.listing_id 
-                AND pb.badge_id = ANY($${firstBatchIds.length + 1}::bigint[])
-              )`;
+            // Agregar filtros VillaNet si hay badges seleccionados
+            if (badgeSlugs.length > 0) {
+              const validSlugs = badgeSlugs.filter(slug => VILLANET_BADGE_FIELD_MAP[slug]);
+              validSlugs.forEach(slug => {
+                const fieldName = VILLANET_BADGE_FIELD_MAP[slug];
+                detailsSQL += ` AND l.${fieldName} = true`;
+              });
             }
             
             detailsSQL += ` ORDER BY array_position(ARRAY[${placeholders}], l.listing_id)`;
             
             const queryParams = [...firstBatchIds];
-            if (badgeIds.length > 0) {
-              queryParams.push(badgeIds);
-            }
             
             const detailsResult = await pool.query(detailsSQL, queryParams);
             const results = detailsResult.rows;
@@ -320,12 +424,12 @@ r.get('/', async (req, res) => {
       }
     }
 
-    // ✅ SOLUCIÓN DEFINITIVA: Query principal SIN RANK en la base de datos
+    // Query principal
     const standardParams = [...params];
     standardParams.push(lim);
     standardParams.push(off);
 
-    // Query principal - SIN REFERENCIAS A RANK EN LA BD
+    // 🔥 QUERY PRINCIPAL ACTUALIZADA - Incluye todos los campos VillaNet
     const sql = `
       SELECT 
         l.listing_id as id,
@@ -333,8 +437,39 @@ r.get('/', async (req, res) => {
         l.bedrooms,
         l.bathrooms, 
         l.price_usd as "priceUSD",
-        ${(90 + Math.random()*10).toFixed(2)} as rank,  -- ✅ RANK FAKE EN MEMORIA
-        l.location_text as location,
+
+        -- 🔥 Rank REAL de la BD - SIN FALLBACK, SIN RANDOM, SIN MULTIPLICAR
+        l.villanet_rank as rank,
+
+        -- Ubicación "bonita" VillaNet primero
+        COALESCE(l.villanet_destination_tag, l.villanet_city, l.location_text) as location,
+
+        -- Campos VillaNet extra
+        l.villanet_destination_tag as "villaNetDestinationTag",
+        l.villanet_city as "villaNetCity",
+        l.villanet_property_manager_name as "villaNetPropertyManagerName",
+        l.villanet_commission_rate as "villaNetCommissionRate",
+
+        -- 🔥 NUEVOS CAMPOS BOOLEANOS DE VILLANET
+        l.villanet_gated_community as "villanetGatedCommunity",
+        l.villanet_golf_villa as "villanetGolfVilla",
+        l.villanet_resort_villa as "villanetResortVilla",
+        l.villanet_resort_collection_name as "villanetResortCollectionName",
+        l.villanet_chef_included as "villanetChefIncluded",
+        l.villanet_true_beach_front as "villanetTrueBeachFront",
+        l.villanet_cook_included as "villanetCookIncluded",
+        l.villanet_waiter_butler_included as "villanetWaiterButlerIncluded",
+        l.villanet_ocean_front as "villanetOceanFront",
+        l.villanet_ocean_view as "villanetOceanView",
+        l.villanet_walk_to_beach as "villanetWalkToBeach",
+        l.villanet_accessible as "villanetAccessible",
+        l.villanet_private_gym as "villanetPrivateGym",
+        l.villanet_private_cinema as "villanetPrivateCinema",
+        l.villanet_pickleball as "villanetPickleball",
+        l.villanet_tennis as "villanetTennis",
+        l.villanet_golf_cart_included as "villanetGolfCartIncluded",
+        l.villanet_heated_pool as "villanetHeatedPool",
+
         l.city, 
         l.country, 
         COALESCE(l.hero_image_url, '') as "heroImage",
@@ -346,14 +481,12 @@ r.get('/', async (req, res) => {
       LIMIT $${standardParams.length-1} OFFSET $${standardParams.length};
     `;
 
-    // Count query (segura)
+    // Count query
     const countSQL = `
       SELECT COUNT(*)::int AS total
       FROM listings l
       ${whereSQL};
     `;
-
-    console.log('🔍 Executing main query with order:', orderSQL);
 
     // Ejecutar queries
     const [rowsResult, countResult] = await Promise.all([
@@ -437,16 +570,52 @@ r.get('/:id', async (req, res) => {
   }
 });
 
-// Función normalizeResults (sin cambios)
+// 🔥 FUNCIÓN normalizeResults ACTUALIZADA - Incluye los nuevos campos
 function normalizeResults(results) {
   const PLACEHOLDER = 'https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200&q=80&auto=format&fit=crop';
   
   return results.map((item) => {
     const images = Array.isArray(item.images_json) ? item.images_json : [];
     const first = images[0];
+
+    // 🔥 NORMALIZACIÓN CORRECTA DEL RANK:
+    const rank = (item.rank !== null && item.rank !== undefined)
+      ? Number(item.rank)
+      : null;
+    
+    // 🔥 Normalizar booleanos de VillaNet (asegurar que sean booleanos)
+    const normalizeBoolean = (value) => {
+      if (value === null || value === undefined) return false;
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'string') {
+        return value.toLowerCase() === 'true' || value.toLowerCase() === 'yes' || value === '1';
+      }
+      return Boolean(value);
+    };
     
     return {
       ...item,
+      rank: rank,
+      
+      // 🔥 Asegurar que los campos booleanos sean realmente booleanos
+      villanetChefIncluded: normalizeBoolean(item.villanetChefIncluded),
+      villanetHeatedPool: normalizeBoolean(item.villanetHeatedPool),
+      villanetOceanView: normalizeBoolean(item.villanetOceanView),
+      villanetTrueBeachFront: normalizeBoolean(item.villanetTrueBeachFront),
+      villanetGolfCartIncluded: normalizeBoolean(item.villanetGolfCartIncluded),
+      villanetTennis: normalizeBoolean(item.villanetTennis),
+      villanetPickleball: normalizeBoolean(item.villanetPickleball),
+      villanetPrivateGym: normalizeBoolean(item.villanetPrivateGym),
+      villanetPrivateCinema: normalizeBoolean(item.villanetPrivateCinema),
+      villanetCookIncluded: normalizeBoolean(item.villanetCookIncluded),
+      villanetWaiterButlerIncluded: normalizeBoolean(item.villanetWaiterButlerIncluded),
+      villanetOceanFront: normalizeBoolean(item.villanetOceanFront),
+      villanetWalkToBeach: normalizeBoolean(item.villanetWalkToBeach),
+      villanetAccessible: normalizeBoolean(item.villanetAccessible),
+      villanetGatedCommunity: normalizeBoolean(item.villanetGatedCommunity),
+      villanetGolfVilla: normalizeBoolean(item.villanetGolfVilla),
+      villanetResortVilla: normalizeBoolean(item.villanetResortVilla),
+
       id: item.id || `temp-${Math.random().toString(36).slice(2)}`,
       images_json: images,
       heroImage: (typeof first === 'string' && first) || item.heroImage || PLACEHOLDER,

@@ -1,6 +1,3 @@
-// ⚠️ ESTE BACKEND TIENE RANK FAKE PARA TESTEAR ORDENAMIENTO
-// SOLUCIÓN TEMPORAL: Rank calculado en JavaScript para evitar errores de PostgreSQL
-
 import { Router } from 'express';
 import { auth } from '../middleware/auth.js';
 import { requireRole } from '../middleware/requireRole.js';
@@ -10,12 +7,11 @@ import { getAvailabilityFor } from '../services/availability.service.js';
 
 const r = Router();
 
-// Configuración optimizada
 const MAX_AVAILABILITY_SESSION_SIZE = 1000;
-const AVAILABILITY_SESSION_TTL = 300000; // 5 minutos
+const AVAILABILITY_SESSION_TTL = 300000;
 
 /************************************************************
- * GET /listings  (PÚBLICO)
+ * GET /listings (PRIVADO – admin/TA/PMC)
  ************************************************************/
 r.get('/', auth(false), async (req, res) => {
   try {
@@ -32,123 +28,128 @@ r.get('/', auth(false), async (req, res) => {
       offset = '0',
       sort = 'rank',
       availabilitySession = '',
-      availabilityCursor = '0'
+      availabilityCursor = '0',
+      destination = '' // 🔥 NUEVO: Filtro por destination
     } = req.query;
 
     const lim = Math.min(Math.max(parseInt(limit) || 24, 1), 100);
     const off = Math.max(parseInt(offset) || 0, 0);
     const cursor = parseInt(availabilityCursor) || 0;
-    const hasAvailabilityFilter = checkIn && checkOut;
+    const hasAvailabilityFilter = !!(checkIn && checkOut);
 
-    console.log("🎯 Sorting param:", sort);
+    // 🔥 Detectar campos booleanos VillaNet dinámicamente
+    const { rows: villaNetBooleanFields } = await pool.query(`
+      SELECT column_name
+      FROM information_schema.columns 
+      WHERE table_name = 'listings' 
+        AND table_schema = 'public'
+        AND column_name LIKE 'villanet_%'
+        AND data_type = 'boolean'
+      ORDER BY column_name;
+    `);
 
-    // Validación de fechas
-    if (hasAvailabilityFilter) {
-      const re = /^\d{4}-\d{2}-\d{2}$/;
-      if (!re.test(checkIn) || !re.test(checkOut)) {
-        return res.status(400).json({ message: "Invalid date format. Use YYYY-MM-DD" });
-      }
-      if (new Date(checkOut) <= new Date(checkIn)) {
-        return res.status(400).json({ message: "Check-out must be after check-in" });
-      }
-    }
+    // 🔥 Crear mapeo dinámico de slugs a campos
+    const VILLANET_BADGE_FIELD_MAP = {};
+    villaNetBooleanFields.forEach(field => {
+      const fieldName = field.column_name;
+      const slug = fieldName.replace('villanet_', '').replace(/_/g, '-');
+      VILLANET_BADGE_FIELD_MAP[slug] = fieldName;
+    });
 
-    // ✅ FIX: Construir cache key INCLUYENDO sort
-    const cacheKey = `public:listings:${JSON.stringify({
-      q,
-      bedrooms,
-      bathrooms,
-      minPrice,
-      maxPrice,
-      checkIn,
-      checkOut,
-      badges,
-      limit,
-      offset,
-      sort
-    })}`;
+    console.log('[Private API] Dynamic VillaNet badge map:', VILLANET_BADGE_FIELD_MAP);
 
-    // ✅ FIX: Solo usar cache si NO hay filtros de disponibilidad
-    if (!hasAvailabilityFilter) {
-      const cached = cache.get(cacheKey);
-      if (cached) {
-        console.log("✅ Cache HIT for sort:", sort);
-        return res.json(cached);
-      }
-      console.log("❌ Cache MISS for sort:", sort);
-    }
-
-    // -----------------------------------------
-    // 1) Construcción de filtros SQL
-    // -----------------------------------------
+    /***********************
+     * SQL FILTERS
+     ***********************/
     const clauses = [];
     const params = [];
-    const joins = [];
 
-    // Búsqueda texto
-    const qNorm = q.trim().toLowerCase();
-    if (qNorm.length >= 3) {
-      params.push(`%${qNorm}%`);
+    // 🔥 BÚSQUEDA UNIFICADA: destination + q buscan en los mismos campos
+    let searchTerm = '';
+    
+    // Prioridad: destination primero, luego q
+    if (destination?.toString().trim()) {
+      searchTerm = destination.toString().trim();
+    } else if (q?.toString().trim()) {
+      searchTerm = q.toString().trim();
+    }
+    
+    // Si hay término de búsqueda (de cualquiera de las dos fuentes)
+    if (searchTerm) {
+      const searchLower = `%${searchTerm.toLowerCase()}%`;
+      params.push(searchLower);
       const idx = params.length;
+      
+      // 🔥 BUSCAR EN TODOS LOS CAMPOS RELEVANTES (CONSISTENTE CON ENDPOINT PÚBLICO)
       clauses.push(`(
-        LOWER(l.name) ILIKE $${idx} OR
-        LOWER(l.location_text) ILIKE $${idx} OR
+        LOWER(l.name) ILIKE $${idx} OR 
+        LOWER(l.villanet_destination_tag) ILIKE $${idx} OR 
+        LOWER(l.villanet_city) ILIKE $${idx} OR
         LOWER(l.city) ILIKE $${idx} OR
-        LOWER(l.country) ILIKE $${idx}
+        LOWER(l.country) ILIKE $${idx} OR
+        LOWER(l.location_text) ILIKE $${idx} OR
+        LOWER(l.description) ILIKE $${idx}
       )`);
     }
 
-    // Badges
+    // 🔥 FILTRO POR BADGES VILLANET (CAMPOS BOOLEANOS)
     const badgeSlugs = badges.split(',').filter(Boolean);
+    
     if (badgeSlugs.length > 0) {
-      const bq = await pool.query(
-        `SELECT id FROM badges WHERE slug = ANY($1::text[])`,
-        [badgeSlugs]
-      );
-      const badgeIds = bq.rows.map(r => r.id);
-
-      if (badgeIds.length > 0) {
-        params.push(badgeIds);
-        clauses.push(`
-          EXISTS (
-            SELECT 1 FROM property_badges pb
-            WHERE pb.property_id = l.listing_id
-            AND pb.badge_id = ANY($${params.length}::bigint[])
-          )
-        `);
+      console.log('[Private API] Filtering by VillaNet badges:', badgeSlugs);
+      
+      // Verificar que todos los slugs sean válidos
+      const validSlugs = badgeSlugs.filter(slug => VILLANET_BADGE_FIELD_MAP[slug]);
+      
+      if (validSlugs.length > 0) {
+        // Agregar condición para cada badge VillaNet seleccionado
+        validSlugs.forEach(slug => {
+          const fieldName = VILLANET_BADGE_FIELD_MAP[slug];
+          clauses.push(`l.${fieldName} = true`);
+        });
+        
+        console.log('[Private API] Applied VillaNet badge filters:', {
+          requested: badgeSlugs,
+          valid: validSlugs,
+          fields: validSlugs.map(slug => VILLANET_BADGE_FIELD_MAP[slug])
+        });
+      } else {
+        console.log('[Private API] No valid VillaNet badges found for:', badgeSlugs);
       }
     }
 
     // Bedrooms
-    const bedroomsList = bedrooms.split(',').map(s => s.trim()).filter(Boolean);
+    const bedroomsList = bedrooms.split(',').filter(Boolean);
     if (bedroomsList.length) {
       const nums = bedroomsList.filter(v => /^\d+$/.test(v)).map(Number);
       const has5 = bedroomsList.includes('5+');
       const has6 = bedroomsList.includes('6+');
 
-      const parts = [];
+      const ORs = [];
       if (nums.length) {
         params.push(nums);
-        parts.push(`l.bedrooms = ANY($${params.length}::int[])`);
+        ORs.push(`l.bedrooms = ANY($${params.length}::int[])`);
       }
-      if (has6) parts.push(`l.bedrooms >= 6`);
-      else if (has5) parts.push(`l.bedrooms >= 5`);
-      if (parts.length) clauses.push(`(${parts.join(' OR ')})`);
+      if (has6) ORs.push(`l.bedrooms >= 6`);
+      else if (has5) ORs.push(`l.bedrooms >= 5`);
+
+      clauses.push(`(${ORs.join(' OR ')})`);
     }
 
     // Bathrooms
-    const bathroomsList = bathrooms.split(',').map(s => s.trim()).filter(Boolean);
+    const bathroomsList = bathrooms.split(',').filter(Boolean);
     if (bathroomsList.length) {
       const nums = bathroomsList.filter(v => /^\d+$/.test(v)).map(Number);
       const has5 = bathroomsList.includes('5+');
 
-      const parts = [];
+      const ORs = [];
       if (nums.length) {
         params.push(nums);
-        parts.push(`l.bathrooms = ANY($${params.length}::int[])`);
+        ORs.push(`l.bathrooms = ANY($${params.length}::int[])`);
       }
-      if (has5) parts.push(`l.bathrooms >= 5`);
-      if (parts.length) clauses.push(`(${parts.join(' OR ')})`);
+      if (has5) ORs.push(`l.bathrooms >= 5`);
+
+      clauses.push(`(${ORs.join(' OR ')})`);
     }
 
     // Price
@@ -161,110 +162,133 @@ r.get('/', auth(false), async (req, res) => {
       clauses.push(`l.price_usd <= $${params.length}`);
     }
 
-    // Base
+    // Base filters
     clauses.push(`l.is_listed = true`);
+    clauses.push(`l.villanet_enabled = true`);
     clauses.push(`(l.images_json IS NOT NULL AND l.images_json != '[]'::jsonb)`);
 
     const whereSQL = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-    const joinSQL = joins.length ? joins.join(' ') : '';
 
-    // -----------------------------------------
-    // 2) ORDER BY (SIN RANK EN BD - SOLUCIÓN TEMPORAL)
-    // -----------------------------------------
+    /***********************
+     * ORDERING
+     ***********************/
     let orderSQL = `ORDER BY l.updated_at DESC`;
 
-    console.log("🔧 Building ORDER BY for:", sort);
-
     if (sort === 'rank') {
-      // ✅ SOLUCIÓN TEMPORAL: Ordenar solo por updated_at
-      orderSQL = `ORDER BY l.updated_at DESC`;
-    } else if (sort === 'price-low') {
+      orderSQL = `ORDER BY l.villanet_rank DESC NULLS LAST, l.updated_at DESC`;
+    } else if (sort === 'price_low') {
       orderSQL = `ORDER BY l.price_usd ASC NULLS LAST, l.updated_at DESC`;
-    } else if (sort === 'price-high') {
+    } else if (sort === 'price_high') {
       orderSQL = `ORDER BY l.price_usd DESC NULLS LAST, l.updated_at DESC`;
     } else if (sort === 'bedrooms') {
       orderSQL = `ORDER BY l.bedrooms DESC NULLS LAST, l.updated_at DESC`;
     }
 
-    console.log("✅ ORDER BY SQL:", orderSQL);
+    /***********************
+     * NO-DATES MODE
+     ***********************/
+    if (!hasAvailabilityFilter) {
+      const sql = `
+        SELECT 
+          l.listing_id AS id,
+          l.name,
+          l.bedrooms,
+          l.bathrooms,
+          l.price_usd AS "priceUSD",
 
-    // -----------------------------------------------------------------------
-    // ⚡ 3) ESTRATEGIA DISPONIBILIDAD #1 — Crear Session (primer request)
-    // -----------------------------------------------------------------------
-    if (hasAvailabilityFilter && !availabilitySession) {
+          -- REAL RANK
+          l.villanet_rank AS rank,
 
-      // 3.1) Obtener CANDIDATE IDs
+          -- REAL VILLANET LOCATION
+          COALESCE(l.villanet_destination_tag, l.villanet_city, l.city) AS location,
+
+          l.villanet_destination_tag AS "villaNetDestinationTag",
+          l.villanet_city AS "villaNetCity",
+          l.villanet_property_manager_name AS "villaNetPropertyManagerName",
+          l.villanet_commission_rate AS "villaNetCommissionRate",
+
+          -- 🔥 NUEVOS CAMPOS BOOLEANOS DE VILLANET
+          l.villanet_gated_community AS "villanetGatedCommunity",
+          l.villanet_golf_villa AS "villanetGolfVilla",
+          l.villanet_resort_villa AS "villanetResortVilla",
+          l.villanet_resort_collection_name AS "villanetResortCollectionName",
+          l.villanet_chef_included AS "villanetChefIncluded",
+          l.villanet_true_beach_front AS "villanetTrueBeachFront",
+          l.villanet_cook_included AS "villanetCookIncluded",
+          l.villanet_waiter_butler_included AS "villanetWaiterButlerIncluded",
+          l.villanet_ocean_front AS "villanetOceanFront",
+          l.villanet_ocean_view AS "villanetOceanView",
+          l.villanet_walk_to_beach AS "villanetWalkToBeach",
+          l.villanet_accessible AS "villanetAccessible",
+          l.villanet_private_gym AS "villanetPrivateGym",
+          l.villanet_private_cinema AS "villanetPrivateCinema",
+          l.villanet_pickleball AS "villanetPickleball",
+          l.villanet_tennis AS "villanetTennis",
+          l.villanet_golf_cart_included AS "villanetGolfCartIncluded",
+          l.villanet_heated_pool AS "villanetHeatedPool",
+
+          COALESCE(l.hero_image_url, '') AS "heroImage",
+          COALESCE(l.images_json, '[]'::jsonb) AS images_json,
+          l.updated_at
+        FROM listings l
+        ${whereSQL}
+        ${orderSQL}
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2};
+      `;
+
+      const countSQL = `
+        SELECT COUNT(*)::int AS total 
+        FROM listings l
+        ${whereSQL};
+      `;
+
+      const rows = await pool.query(sql, [...params, lim, off]);
+      const count = await pool.query(countSQL, params);
+
+      return res.json({
+        results: normalizeResults(rows.rows),
+        total: count.rows[0].total,
+        limit: lim,
+        offset: off,
+        hasMore: off + lim < count.rows[0].total
+      });
+    }
+
+    /***********************
+     * AVAILABILITY MODE
+     ***********************/
+    let candidateIds = [];
+
+    // First request (create session)
+    if (!availabilitySession) {
       const idsSQL = `
         SELECT l.listing_id AS id
         FROM listings l
-        ${joinSQL}
         ${whereSQL}
         LIMIT ${MAX_AVAILABILITY_SESSION_SIZE};
       `;
       const idsRes = await pool.query(idsSQL, params);
-      const candidateIds = idsRes.rows.map(r => r.id);
+      candidateIds = idsRes.rows.map(r => r.id);
 
-      console.log(`🟩 Availability candidates: ${candidateIds.length}`);
-
-      // 3.2) Llamar Guesty Availability
       const availability = await getAvailabilityFor(candidateIds, checkIn, checkOut);
 
       const availableIds = availability
         .filter(a => a.available)
         .map(a => a.listing_id);
 
-      console.log(`🟢 AVAILABLE: ${availableIds.length}`);
-
-      // 3.3) Crear session
-      const sessionId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const sessionId = `a_${Date.now()}_${Math.random().toString(36).slice(2)}`;
       cache.set(
         `availability:${sessionId}`,
         { availableIds, checkIn, checkOut },
         AVAILABILITY_SESSION_TTL
       );
 
-      // 3.4) Responder PRIMERA página
       const batchIds = availableIds.slice(0, lim);
-
-      if (batchIds.length === 0) {
-        return res.json({
-          results: [],
-          total: 0,
-          hasMore: false,
-          availabilityApplied: true,
-          availabilitySession: sessionId,
-          availabilityCursor: 0
-        });
-      }
-
-      // ✅ SOLUCIÓN: Rank calculado en JavaScript
-      const detailsSQL = `
-        SELECT
-          l.listing_id AS id,
-          l.name,
-          l.bedrooms,
-          l.bathrooms,
-          l.price_usd AS "priceUSD",
-          ${(90 + Math.random()*10).toFixed(2)} as rank, -- ✅ RANK EN MEMORIA
-          l.location_text AS location,
-          l.city,
-          l.country,
-          COALESCE(l.hero_image_url, '') AS "heroImage",
-          COALESCE(l.images_json, '[]'::jsonb) AS images_json,
-          l.updated_at
-        FROM listings l
-        WHERE l.listing_id = ANY($1)
-        ${orderSQL};
-      `;
-
-      const details = await pool.query(detailsSQL, [batchIds]);
-      const normalized = normalizeResults(details.rows);
+      const detailRows = await fetchDetails(batchIds, orderSQL, badgeSlugs, VILLANET_BADGE_FIELD_MAP);
 
       return res.json({
-        results: normalized,
+        results: normalizeResults(detailRows),
         total: availableIds.length,
-        limit: lim,
-        offset: 0,
         hasMore: availableIds.length > lim,
         availabilityApplied: true,
         availabilitySession: sessionId,
@@ -272,222 +296,215 @@ r.get('/', auth(false), async (req, res) => {
       });
     }
 
-    // -----------------------------------------------------------------------
-    // ⚡ 4) ESTRATEGIA DISPONIBILIDAD #2 — Paginar Session existente
-    // -----------------------------------------------------------------------
-    if (hasAvailabilityFilter && availabilitySession) {
-      const sessionData = cache.get(`availability:${availabilitySession}`);
-
-      if (!sessionData) {
-        return res.status(400).json({
-          message: "Availability session expired. Please search again.",
-          expiredSession: true
-        });
-      }
-
-      const { availableIds, checkIn: sIn, checkOut: sOut } = sessionData;
-
-      if (sIn !== checkIn || sOut !== checkOut) {
-        return res.status(400).json({
-          message: "Date mismatch — start a new search."
-        });
-      }
-
-      const batchIds = availableIds.slice(cursor, cursor + lim);
-
-      if (batchIds.length === 0) {
-        return res.json({
-          results: [],
-          total: availableIds.length,
-          limit: lim,
-          hasMore: false,
-          availabilityApplied: true,
-          availabilitySession,
-          availabilityCursor: cursor
-        });
-      }
-
-      // ✅ SOLUCIÓN: Rank calculado en JavaScript
-      const detailsSQL = `
-        SELECT
-          l.listing_id AS id,
-          l.name,
-          l.bedrooms,
-          l.bathrooms,
-          l.price_usd AS "priceUSD",
-          ${(90 + Math.random()*10).toFixed(2)} as rank, -- ✅ RANK EN MEMORIA
-          l.location_text AS location,
-          l.city,
-          l.country,
-          COALESCE(l.hero_image_url, '') AS "heroImage",
-          COALESCE(l.images_json, '[]'::jsonb) AS images_json,
-          l.updated_at
-        FROM listings l
-        WHERE l.listing_id = ANY($1)
-        ${orderSQL};
-      `;
-
-      const details = await pool.query(detailsSQL, [batchIds]);
-      const normalized = normalizeResults(details.rows);
-
-      const nextCursor = cursor + lim;
-      const hasMore = nextCursor < availableIds.length;
-
-      return res.json({
-        results: normalized,
-        total: availableIds.length,
-        limit: lim,
-        offset: off,
-        hasMore,
-        availabilityApplied: true,
-        availabilitySession,
-        availabilityCursor: nextCursor
-      });
+    // Subsequent pages
+    const session = cache.get(`availability:${availabilitySession}`);
+    if (!session) {
+      return res.status(400).json({ message: 'Availability session expired' });
     }
 
-    // -----------------------------------------------------------------------
-    // ⚡ 5) ESTRATEGIA STANDARD (sin disponibilidad)
-    // -----------------------------------------------------------------------
-    const standardParams = [...params, lim, off];
+    const { availableIds } = session;
 
-    // ✅ SOLUCIÓN: Query principal SIN RANK en BD
-    const sql = `
-      SELECT
-        l.listing_id AS id,
-        l.name,
-        l.bedrooms,
-        l.bathrooms,
-        l.price_usd AS "priceUSD",
-        ${(90 + Math.random()*10).toFixed(2)} as rank, -- ✅ RANK EN MEMORIA
-        l.location_text AS location,
-        l.city,
-        l.country,
-        COALESCE(l.hero_image_url, '') AS "heroImage",
-        COALESCE(l.images_json, '[]'::jsonb) AS images_json,
-        l.updated_at
-      FROM listings l
-      ${joinSQL}
-      ${whereSQL}
-      ${orderSQL}
-      LIMIT $${standardParams.length - 1} OFFSET $${standardParams.length};
-    `;
+    const batchIds = availableIds.slice(cursor, cursor + lim);
+    const detailRows = await fetchDetails(batchIds, orderSQL, badgeSlugs, VILLANET_BADGE_FIELD_MAP);
 
-    const countSQL = `
-      SELECT COUNT(*)::int AS total
-      FROM listings l
-      ${joinSQL}
-      ${whereSQL};
-    `;
-
-    console.log("🔍 Executing SQL with ORDER BY:", orderSQL);
-
-    const [rows, count] = await Promise.all([
-      pool.query(sql, standardParams),
-      pool.query(countSQL, standardParams.slice(0, standardParams.length - 2))
-    ]);
-
-    console.log("📊 Query returned", rows.rows.length, "rows");
-    if (rows.rows.length > 0) {
-      console.log("🏠 First property:", {
-        name: rows.rows[0].name,
-        bedrooms: rows.rows[0].bedrooms,
-        priceUSD: rows.rows[0].priceUSD,
-        rank: rows.rows[0].rank
-      });
-    }
-
-    const normalized = normalizeResults(rows.rows);
-    const totalInDB = count.rows[0].total;
-
-    const response = {
-      results: normalized,
-      total: totalInDB,
-      limit: lim,
-      offset: off,
-      hasMore: off + lim < totalInDB,
-      availabilityApplied: false
-    };
-
-    // ✅ FIX: Cachear SOLO si no hay filtros de disponibilidad
-    if (!hasAvailabilityFilter) {
-      console.log("💾 Caching response for sort:", sort);
-      cache.set(cacheKey, response, 300000);
-    }
-
-    return res.json(response);
+    return res.json({
+      results: normalizeResults(detailRows),
+      total: availableIds.length,
+      hasMore: cursor + lim < availableIds.length,
+      availabilityApplied: true,
+      availabilitySession,
+      availabilityCursor: cursor + lim
+    });
 
   } catch (err) {
-    console.error("❌ Listings error:", err);
-    return res.status(500).json({ message: "Error fetching listings" });
+    console.error('❌ Listings error:', err);
+    res.status(500).json({ message: 'Server error fetching listings' });
   }
 });
 
 /************************************************************
- * GET /listings/:id  (PRIVADO)
+ * GET /listings/:id (PRIVADO – admin/TA/PMC, con TODOS LOS CAMPOS)
  ************************************************************/
 r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
   try {
     const { id } = req.params;
-    const cacheKey = `listing:${id}`;
-
-    const cached = cache.get(cacheKey);
-    if (cached) return res.json(cached);
 
     const { rows } = await pool.query(
-      `SELECT
+      `SELECT 
         listing_id,
         name,
         bedrooms,
         bathrooms,
-        price_usd AS "price_usd",
-        location_text,
-        city,
-        country,
-        min_nights,
-        is_listed,
-        timezone,
-        hero_image_url AS "hero_image_url",
-        images_json,
+        price_usd,
+
+        -- REAL LOCATION
+        COALESCE(villanet_destination_tag, villanet_city, city) AS location,
+
         description,
         amenities_json AS amenities,
+        images_json,
+        hero_image_url,
+
+        -- FULL VILLANET DATA
+        villanet_rank,
+        villanet_commission_rate,
+        villanet_destination_tag,
+        villanet_city,
+        villanet_property_manager_name,
+        villanet_partner_reservation_email,
+        villanet_property_email,
+        villanet_pmc_information,
+        villanet_exclusive_units_managed,
+        villanet_years_in_business,
+        villanet_avg_response_time_hours,
+        villanet_calendar_sync_99,
+        villanet_credit_card_accepted,
+        villanet_insured,
+        villanet_bank_transfer_accepted,
+        villanet_standardized_housekeeping,
+        villanet_staff_gratuity_guideline,
+
+        -- 🔥 NUEVOS CAMPOS BOOLEANOS DE VILLANET
+        villanet_gated_community,
+        villanet_golf_villa,
+        villanet_resort_villa,
+        villanet_resort_collection_name,
+        villanet_chef_included,
+        villanet_true_beach_front,
+        villanet_cook_included,
+        villanet_waiter_butler_included,
+        villanet_ocean_front,
+        villanet_ocean_view,
+        villanet_walk_to_beach,
+        villanet_accessible,
+        villanet_private_gym,
+        villanet_private_cinema,
+        villanet_pickleball,
+        villanet_tennis,
+        villanet_golf_cart_included,
+        villanet_heated_pool,
+
         updated_at
       FROM listings
       WHERE listing_id = $1`,
       [id]
     );
 
-    if (!rows.length) {
-      return res.status(404).json({ message: "Listing not found" });
-    }
+    if (!rows.length) return res.status(404).json({ message: 'Not found' });
 
-    cache.set(cacheKey, rows[0], 600000);
-    return res.json(rows[0]);
-
+    res.json(rows[0]);
   } catch (err) {
-    console.error("Detail error:", err);
-    return res.status(500).json({ message: "Error fetching listing detail" });
+    console.error('❌ Detail error:', err);
+    res.status(500).json({ message: 'Error fetching detail' });
   }
 });
 
 /************************************************************
- * Helper normalizeResults - SIMPLIFICADO
+ * Helpers
  ************************************************************/
-function normalizeResults(results) {
-  const PLACEHOLDER =
-    'https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200&q=80&auto=format&fit=crop';
+async function fetchDetails(ids, orderSQL, badgeSlugs = [], VILLANET_BADGE_FIELD_MAP = {}) {
+  if (!ids.length) return [];
+  
+  let sql = `
+    SELECT 
+      l.listing_id AS id,
+      l.name,
+      l.bedrooms,
+      l.bathrooms,
+      l.price_usd AS "priceUSD",
 
-  return results.map(row => {
-    const images = Array.isArray(row.images_json) ? row.images_json : [];
-    const first = images[0];
+      l.villanet_rank AS rank,
 
+      COALESCE(l.villanet_destination_tag, l.villanet_city, l.city) AS location,
+
+      l.villanet_destination_tag AS "villaNetDestinationTag",
+      l.villanet_city AS "villaNetCity",
+      l.villanet_property_manager_name AS "villaNetPropertyManagerName",
+      l.villanet_commission_rate AS "villaNetCommissionRate",
+
+      -- 🔥 NUEVOS CAMPOS BOOLEANOS DE VILLANET
+      l.villanet_gated_community AS "villanetGatedCommunity",
+      l.villanet_golf_villa AS "villanetGolfVilla",
+      l.villanet_resort_villa AS "villanetResortVilla",
+      l.villanet_resort_collection_name AS "villanetResortCollectionName",
+      l.villanet_chef_included AS "villanetChefIncluded",
+      l.villanet_true_beach_front AS "villanetTrueBeachFront",
+      l.villanet_cook_included AS "villanetCookIncluded",
+      l.villanet_waiter_butler_included AS "villanetWaiterButlerIncluded",
+      l.villanet_ocean_front AS "villanetOceanFront",
+      l.villanet_ocean_view AS "villanetOceanView",
+      l.villanet_walk_to_beach AS "villanetWalkToBeach",
+      l.villanet_accessible AS "villanetAccessible",
+      l.villanet_private_gym AS "villanetPrivateGym",
+      l.villanet_private_cinema AS "villanetPrivateCinema",
+      l.villanet_pickleball AS "villanetPickleball",
+      l.villanet_tennis AS "villanetTennis",
+      l.villanet_golf_cart_included AS "villanetGolfCartIncluded",
+      l.villanet_heated_pool AS "villanetHeatedPool",
+
+      COALESCE(l.hero_image_url, '') AS "heroImage",
+      COALESCE(l.images_json, '[]'::jsonb) AS images_json,
+      l.updated_at
+    FROM listings l
+    WHERE l.listing_id = ANY($1)
+  `;
+  
+  // Agregar filtros VillaNet si hay badges seleccionados
+  if (badgeSlugs.length > 0) {
+    const validSlugs = badgeSlugs.filter(slug => VILLANET_BADGE_FIELD_MAP[slug]);
+    validSlugs.forEach(slug => {
+      const fieldName = VILLANET_BADGE_FIELD_MAP[slug];
+      sql += ` AND l.${fieldName} = true`;
+    });
+  }
+  
+  sql += ` ${orderSQL};`;
+  
+  const { rows } = await pool.query(sql, [ids]);
+  return rows;
+}
+
+function normalizeResults(rows) {
+  const PLACEHOLDER = 'https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200';
+  
+  return rows.map(r => {
+    // 🔥 Normalizar booleanos de VillaNet (asegurar que sean booleanos)
+    const normalizeBoolean = (value) => {
+      if (value === null || value === undefined) return false;
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'string') {
+        return value.toLowerCase() === 'true' || value.toLowerCase() === 'yes' || value === '1';
+      }
+      return Boolean(value);
+    };
+    
     return {
-      ...row,
-      id: row.id || `temp-${Math.random().toString(36).slice(2)}`,
-      images_json: images,
+      ...r,
+      rank: r.rank !== null ? Number(r.rank) : null,
+      images_json: Array.isArray(r.images_json) ? r.images_json : [],
       heroImage:
-        (typeof first === 'string' && first) ||
-        row.heroImage ||
-        PLACEHOLDER
+        (Array.isArray(r.images_json) && r.images_json[0]) ||
+        r.heroImage ||
+        PLACEHOLDER,
+      
+      // 🔥 Asegurar que los campos booleanos sean realmente booleanos
+      villanetChefIncluded: normalizeBoolean(r.villanetChefIncluded),
+      villanetHeatedPool: normalizeBoolean(r.villanetHeatedPool),
+      villanetOceanView: normalizeBoolean(r.villanetOceanView),
+      villanetTrueBeachFront: normalizeBoolean(r.villanetTrueBeachFront),
+      villanetGolfCartIncluded: normalizeBoolean(r.villanetGolfCartIncluded),
+      villanetTennis: normalizeBoolean(r.villanetTennis),
+      villanetPickleball: normalizeBoolean(r.villanetPickleball),
+      villanetPrivateGym: normalizeBoolean(r.villanetPrivateGym),
+      villanetPrivateCinema: normalizeBoolean(r.villanetPrivateCinema),
+      villanetCookIncluded: normalizeBoolean(r.villanetCookIncluded),
+      villanetWaiterButlerIncluded: normalizeBoolean(r.villanetWaiterButlerIncluded),
+      villanetOceanFront: normalizeBoolean(r.villanetOceanFront),
+      villanetWalkToBeach: normalizeBoolean(r.villanetWalkToBeach),
+      villanetAccessible: normalizeBoolean(r.villanetAccessible),
+      villanetGatedCommunity: normalizeBoolean(r.villanetGatedCommunity),
+      villanetGolfVilla: normalizeBoolean(r.villanetGolfVilla),
+      villanetResortVilla: normalizeBoolean(r.villanetResortVilla),
     };
   });
 }
