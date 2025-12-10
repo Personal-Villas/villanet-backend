@@ -30,7 +30,8 @@ r.get('/', async (req, res) => {
       sort = 'updated_desc',
       availabilitySession = '',
       availabilityCursor = '0',
-      destination = '' // 🔥 Filtro por destination tag
+      destination = '',
+      guests = '',
     } = req.query;
 
     const lim = Math.min(Math.max(parseInt(String(limit), 10) || 24, 1), 100);
@@ -60,6 +61,7 @@ r.get('/', async (req, res) => {
       checkOut: checkOut || '',
       badges: badges.split(',').filter(Boolean).sort().join(','),
       destination: destination || '',
+      guests: guests || '',
       limit,
       offset,
       sort
@@ -186,6 +188,16 @@ r.get('/', async (req, res) => {
       params.push(Number(maxPrice));
       clauses.push(`l.price_usd <= $${params.length}`);
     }
+
+// Guests (aproximación: usamos bedrooms * 2 como capacidad mínima)
+// TODO: reemplazar por l.max_guests cuando exista la columna real en la tabla listings
+if (guests) {
+  const guestsInt = parseInt(String(guests), 10);
+  if (!Number.isNaN(guestsInt) && guestsInt > 0) {
+    params.push(guestsInt);
+    clauses.push(`(l.bedrooms IS NOT NULL AND (l.bedrooms * 2) >= $${params.length})`);
+  }
+}
 
     // Filtros base VillaNet
     clauses.push(`l.is_listed = true`);
