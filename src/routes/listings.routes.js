@@ -29,7 +29,8 @@ r.get('/', auth(false), async (req, res) => {
       sort = 'rank',
       availabilitySession = '',
       availabilityCursor = '0',
-      destination = '' // 🔥 NUEVO: Filtro por destination
+      destination = '',
+      guests = '', 
     } = req.query;
 
     const lim = Math.min(Math.max(parseInt(limit) || 24, 1), 100);
@@ -119,21 +120,20 @@ r.get('/', auth(false), async (req, res) => {
     }
 
     // Bedrooms
-    const bedroomsList = bedrooms.split(',').filter(Boolean);
+    const bedroomsList = bedrooms.split(',').map(s => s.trim()).filter(Boolean);
     if (bedroomsList.length) {
-      const nums = bedroomsList.filter(v => /^\d+$/.test(v)).map(Number);
-      const has5 = bedroomsList.includes('5+');
-      const has6 = bedroomsList.includes('6+');
-
-      const ORs = [];
-      if (nums.length) {
-        params.push(nums);
-        ORs.push(`l.bedrooms = ANY($${params.length}::int[])`);
+      // si viene "5+" -> mínimo 5
+      if (bedroomsList.includes('5+')) {
+        clauses.push(`l.bedrooms >= 5`);
+      } else {
+        // tomá el mínimo (por si viniera más de uno)
+        const mins = bedroomsList.filter(v => /^\d+$/.test(v)).map(Number);
+        if (mins.length) {
+          const minBedrooms = Math.min(...mins);
+          params.push(minBedrooms);
+          clauses.push(`l.bedrooms >= $${params.length}`);
+        }
       }
-      if (has6) ORs.push(`l.bedrooms >= 6`);
-      else if (has5) ORs.push(`l.bedrooms >= 5`);
-
-      clauses.push(`(${ORs.join(' OR ')})`);
     }
 
     // Bathrooms
@@ -160,6 +160,18 @@ r.get('/', auth(false), async (req, res) => {
     if (maxPrice) {
       params.push(Number(maxPrice));
       clauses.push(`l.price_usd <= $${params.length}`);
+    }
+
+    if (guests) {
+      const guestsInt = parseInt(String(guests), 10);
+      if (!Number.isNaN(guestsInt) && guestsInt > 0) {
+        params.push(guestsInt);
+        const idx = params.length;
+    
+        // 1) usar max_guests si existe
+        // 2) fallback: bedrooms*2 si max_guests es null
+        clauses.push(`COALESCE(l.max_guests, (l.bedrooms * 2)) >= $${idx}`);
+      }
     }
 
     // Base filters
@@ -335,6 +347,7 @@ r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) =>
         name,
         bedrooms,
         bathrooms,
+        max_guests,
         price_usd,
 
         -- REAL LOCATION

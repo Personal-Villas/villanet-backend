@@ -152,16 +152,18 @@ r.get('/', async (req, res) => {
     // Bedrooms
     const bedroomsList = bedrooms.split(',').map(s => s.trim()).filter(Boolean);
     if (bedroomsList.length) {
-      const nums = bedroomsList.filter(v => /^\d+$/.test(v)).map(Number);
-      const has5plus = bedroomsList.includes('5+');
-
-      const parts = [];
-      if (nums.length) {
-        params.push(nums);
-        parts.push(`l.bedrooms = ANY($${params.length}::int[])`);
+      // si viene "5+" -> mínimo 5
+      if (bedroomsList.includes('5+')) {
+        clauses.push(`l.bedrooms >= 5`);
+      } else {
+        // tomá el mínimo (por si viniera más de uno)
+        const mins = bedroomsList.filter(v => /^\d+$/.test(v)).map(Number);
+        if (mins.length) {
+          const minBedrooms = Math.min(...mins);
+          params.push(minBedrooms);
+          clauses.push(`l.bedrooms >= $${params.length}`);
+        }
       }
-      if (has5plus) parts.push(`l.bedrooms >= 5`);
-      if (parts.length) clauses.push(`(${parts.join(' OR ')})`);
     }
 
     // Bathrooms
@@ -189,15 +191,17 @@ r.get('/', async (req, res) => {
       clauses.push(`l.price_usd <= $${params.length}`);
     }
 
-// Guests (aproximación: usamos bedrooms * 2 como capacidad mínima)
-// TODO: reemplazar por l.max_guests cuando exista la columna real en la tabla listings
-if (guests) {
-  const guestsInt = parseInt(String(guests), 10);
-  if (!Number.isNaN(guestsInt) && guestsInt > 0) {
-    params.push(guestsInt);
-    clauses.push(`(l.bedrooms IS NOT NULL AND (l.bedrooms * 2) >= $${params.length})`);
-  }
-}
+    if (guests) {
+      const guestsInt = parseInt(String(guests), 10);
+      if (!Number.isNaN(guestsInt) && guestsInt > 0) {
+        params.push(guestsInt);
+        const idx = params.length;
+    
+        // 1) usar max_guests si existe
+        // 2) fallback: bedrooms*2 si max_guests es null
+        clauses.push(`COALESCE(l.max_guests, (l.bedrooms * 2)) >= $${idx}`);
+      }
+    }
 
     // Filtros base VillaNet
     clauses.push(`l.is_listed = true`);
@@ -552,6 +556,7 @@ r.get('/:id', async (req, res) => {
         name, 
         bedrooms, 
         bathrooms, 
+        max_guests,
         price_usd as "price_usd",
         location_text,
         city, 
