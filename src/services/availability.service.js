@@ -1,29 +1,39 @@
 import pLimit from 'p-limit';
 import { guesty } from './guestyClient.js';
 
+// ✅ CONFIGURACIONES
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos
 const DAYS_TTL_MS = 10 * 60 * 1000;
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 2;
 const BASE_DELAY_MS = 1000;
-const MAX_DELAY_MS = 15000;
-const CONCURRENT_REQUESTS = 3;
-const BATCH_SIZE = 35;
+const MAX_DELAY_MS = 10000;
+const CONCURRENT_REQUESTS = 2;
+const BATCH_SIZE = 20;
+const HTTP_TIMEOUT = 7000;
 
-// Caches
-const cache = new Map();
-const daysCache = new Map();
-const inflight = new Map();
-const daysInflight = new Map();
+// ✅ DEBUG SWITCH
+const DEBUG = process.env.AVAIL_DEBUG === '1';
+
+// ✅ CACHES
+const listingAvailCache = new Map(); // { listing_avail: {data, expires} }
+const daysCache = new Map();         // { days: {data, expires} }
+
+// ✅ Inflight
+const listingAvailInflight = new Map(); // key -> Promise(computed)
+const daysInflight = new Map();         // key -> Promise(days[])
 
 // Utilidades
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// Generadores de keys para cache
-const keyOf = (ids, from, to) => `avail:${[...ids].sort().join(',')}:${from}:${to}`;
-const daysKey = (id, from, to) => `days:${id}:${from}:${to}`;
+/* =========================
+ * Keys
+ * ========================= */
+const listingAvailKey = (id, from, to) => `listing_avail:${id}:${from}:${to}`;
+const daysKey = (id, from, to, includeCheckout = false) =>
+  `days:${id}:${from}:${to}:checkout:${includeCheckout ? 1 : 0}`;
 
 /* =========================
- * Gestión de Cache
+ * Cache helpers
  * ========================= */
 function cacheGet(cacheMap, key) {
   const hit = cacheMap.get(key);
@@ -46,61 +56,120 @@ function chunk(arr, n) {
 }
 
 /* =========================
- * Normalización de días - MEJORADA
+ * Deferred helper (para inflight real)
  * ========================= */
-function normalizeDay(d = {}) {
+function createDeferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+/* =========================
+ * Fechas
+ * ========================= */
+function ymd(input) {
+  if (!input) return null;
+
+  try {
+    const s = String(input).trim();
+    if (s.length < 10) return null;
+
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+      return s.slice(0, 10);
+    }
+
+    const date = new Date(s);
+    if (!isNaN(date.getTime())) {
+      return date.toISOString().slice(0, 10);
+    }
+
+    return null;
+  } catch (error) {
+    if (DEBUG) console.warn('[ymd] Error parsing date:', input, error);
+    return null;
+  }
+}
+
+function isValidDate(dateStr) {
+  if (!dateStr || typeof dateStr !== 'string') return false;
+  const date = new Date(dateStr);
+  return !isNaN(date.getTime()) && dateStr.length >= 10;
+}
+
+function buildSetOfStayNights(from, to, { includeCheckout = false } = {}) {
+  const out = new Set();
+
+  if (!isValidDate(from) || !isValidDate(to)) {
+    if (DEBUG) console.warn('[buildSetOfStayNights] Invalid dates:', { from, to });
+    return out;
+  }
+
+  try {
+    const start = new Date(from);
+    const end = new Date(to);
+
+    if (start >= end) {
+      if (DEBUG) console.warn('[buildSetOfStayNights] Start date must be before end date:', { from, to });
+      return out;
+    }
+
+    // noches: from .. to-1
+    for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
+      const dateStr = ymd(d.toISOString());
+      if (dateStr) out.add(dateStr);
+    }
+
+    // opcional: incluir checkout (to) para validar CTD
+    if (includeCheckout) {
+      const checkoutDate = ymd(new Date(to).toISOString());
+      if (checkoutDate) out.add(checkoutDate);
+    }
+  } catch (error) {
+    if (DEBUG) console.error('[buildSetOfStayNights] Error:', error);
+  }
+
+  return out;
+}
+
+/* =========================
+ * Normalización
+ * ========================= */
+function normalizeDay(d = {}, neededDates = null) {
   if (!d) return null;
 
-  // Fecha - más robusto
   let date = null;
   if (d.date) date = d.date;
   else if (d.day) date = d.day;
   else if (d.startDate) date = d.startDate;
   else if (d.start) date = typeof d.start === 'string' ? d.start : null;
-  
+
   date = ymd(date);
   if (!date) return null;
 
-  // Precio - manejo mejorado de valores inválidos
+  if (neededDates && !neededDates.has(date)) return null;
+
   let price = null;
-  if (Number.isFinite(d.price)) {
-    price = d.price;
-  } else if (Number.isFinite(+d.price)) {
-    price = +d.price;
-  } else if (d.price && typeof d.price === 'object' && Number.isFinite(d.price.amount)) {
-    price = d.price.amount;
-  }
+  if (Number.isFinite(d.price)) price = d.price;
+  else if (Number.isFinite(+d.price)) price = +d.price;
+  else if (d.price && typeof d.price === 'object' && Number.isFinite(d.price.amount)) price = d.price.amount;
 
-  // Disponibilidad/Allotment - lógica mejorada
   let allotment = null;
-  if (Number.isFinite(d.allotment)) {
-    allotment = d.allotment;
-  } else if (Number.isFinite(+d.allotment)) {
-    allotment = +d.allotment;
-  } else if (Number.isFinite(d.availableUnits)) {
-    allotment = d.availableUnits;
-  } else if (Number.isFinite(d.available)) {
-    allotment = d.available;
-  }
+  if (Number.isFinite(d.allotment)) allotment = d.allotment;
+  else if (Number.isFinite(+d.allotment)) allotment = +d.allotment;
+  else if (Number.isFinite(d.availableUnits)) allotment = d.availableUnits;
+  else if (Number.isFinite(d.available)) allotment = d.available;
 
-  // Status - lógica más robusta
   let status = d.status;
   if (!status) {
     const hasBlocks = d.blocks && Object.values(d.blocks).some(v => v === true);
-    if (hasBlocks) {
-      status = 'unavailable';
-    } else if (allotment != null) {
-      status = allotment > 0 ? 'available' : 'unavailable';
-    } else {
-      status = 'unknown';
-    }
+    if (hasBlocks) status = 'unavailable';
+    else if (allotment != null) status = allotment > 0 ? 'available' : 'unavailable';
+    else status = 'unknown';
   }
 
-  // Check-in/out permitidos - con valores por defecto seguros
   const cta = d.cta ?? d.checkInAllowed ?? true;
   const ctd = d.ctd ?? d.checkOutAllowed ?? true;
 
-  // Min nights - con validación
   let minStay = d.minNights ?? d.minStay ?? d.baseMinNights ?? 1;
   minStay = Math.max(1, parseInt(minStay) || 1);
 
@@ -115,73 +184,7 @@ function normalizeDay(d = {}) {
   };
 }
 
-/* =========================
- * Helpers de fecha/conversión - MEJORADOS
- * ========================= */
-function ymd(input) {
-  if (!input) return null;
-  
-  try {
-    const s = String(input).trim();
-    if (s.length < 10) return null;
-    
-    // Para fechas ISO (YYYY-MM-DD)
-    if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
-      return s.slice(0, 10);
-    }
-    
-    // Para otros formatos, intentar parsear con Date
-    const date = new Date(s);
-    if (!isNaN(date.getTime())) {
-      return date.toISOString().slice(0, 10);
-    }
-    
-    return null;
-  } catch (error) {
-    console.warn('[ymd] Error parsing date:', input, error);
-    return null;
-  }
-}
-
-function isValidDate(dateStr) {
-  if (!dateStr || typeof dateStr !== 'string') return false;
-  const date = new Date(dateStr);
-  return !isNaN(date.getTime()) && dateStr.length >= 10;
-}
-
-function buildSetOfStayNights(from, to) {
-  const out = new Set();
-  
-  if (!isValidDate(from) || !isValidDate(to)) {
-    console.warn('[buildSetOfStayNights] Invalid dates:', { from, to });
-    return out;
-  }
-
-  try {
-    const start = new Date(from);
-    const end = new Date(to);
-    
-    if (start >= end) {
-      console.warn('[buildSetOfStayNights] Start date must be before end date:', { from, to });
-      return out;
-    }
-
-    // 🔥 IMPORTANTE: No incluir el día de check-out (solo noches de estadía)
-    for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
-      const dateStr = ymd(d.toISOString());
-      if (dateStr) out.add(dateStr);
-    }
-  } catch (error) {
-    console.error('[buildSetOfStayNights] Error:', error);
-  }
-  
-  console.log(`[buildSetOfStayNights DEBUG] From ${from} to ${to} = ${out.size} nights:`, Array.from(out).slice(0, 5));
-  
-  return out;
-}
-
-// Cuando la API viene "por días", invertimos a "por listing"
-function invertDaysToListings(daysArr = []) {
+function invertDaysToListings(daysArr = [], neededDates = null) {
   const byListing = new Map();
 
   for (const d of daysArr) {
@@ -190,30 +193,22 @@ function invertDaysToListings(daysArr = []) {
     const listingId = String(d.listingId || d.id || d._id || '');
     if (!listingId) continue;
 
-    const day = normalizeDay(d);
+    const day = normalizeDay(d, neededDates);
     if (!day) continue;
 
-    if (!byListing.has(listingId)) {
-      byListing.set(listingId, { listingId, days: [] });
-    }
+    if (!byListing.has(listingId)) byListing.set(listingId, { listingId, days: [] });
     byListing.get(listingId).days.push(day);
   }
-  
+
   return Array.from(byListing.values());
 }
 
-/* =========================
- * Normalización de respuestas - MEJORADA
- * ========================= */
-function normalizeCalendarResponse(data) {
+function normalizeCalendarResponse(data, from, to, opts = {}) {
   const out = [];
+  if (!data) return out;
 
-  if (!data) {
-    console.warn('[normalizeCalendarResponse] No data provided');
-    return out;
-  }
+  const neededDates = buildSetOfStayNights(from, to, { includeCheckout: !!opts.includeCheckout });
 
-  // Helper para procesar un listing
   const processListing = (x) => {
     if (!x || typeof x !== 'object') return;
 
@@ -221,453 +216,277 @@ function normalizeCalendarResponse(data) {
     if (!listingId) return;
 
     const rawDays = x.days || x.calendar || x.availability || [];
-    const days = Array.isArray(rawDays) 
-      ? rawDays.map(d => normalizeDay({ ...d, listingId })).filter(Boolean)
-      : [];
+    const days = [];
+
+    if (Array.isArray(rawDays)) {
+      for (const d of rawDays) {
+        const nd = normalizeDay({ ...d, listingId }, neededDates);
+        if (nd) days.push(nd);
+      }
+    }
 
     out.push({ listingId, days });
   };
 
-  // Caso A: formato por días dentro de data.days
-  if (data?.data?.days && Array.isArray(data.data.days)) {
-    console.log('[normalizeCalendarResponse] Format: data.days array');
-    return invertDaysToListings(data.data.days);
-  }
+  if (data?.data?.days && Array.isArray(data.data.days)) return invertDaysToListings(data.data.days, neededDates);
+  if (Array.isArray(data?.days)) return invertDaysToListings(data.days, neededDates);
+  if (Array.isArray(data)) { data.forEach(processListing); return out; }
+  if (data?.data && Array.isArray(data.data)) { data.data.forEach(processListing); return out; }
+  if (data?.data && typeof data.data === 'object') { processListing(data.data); return out; }
+  if (typeof data === 'object') { processListing(data); return out; }
 
-  // Caso B: formato por días en raíz: { days: [...] }
-  if (Array.isArray(data?.days)) {
-    console.log('[normalizeCalendarResponse] Format: root days array');
-    return invertDaysToListings(data.days);
-  }
-
-  // Caso C: array de listings
-  if (Array.isArray(data)) {
-    console.log('[normalizeCalendarResponse] Format: array of listings');
-    data.forEach(processListing);
-    return out;
-  }
-
-  // Caso D: data.data array de listings
-  if (data?.data && Array.isArray(data.data)) {
-    console.log('[normalizeCalendarResponse] Format: data array');
-    data.data.forEach(processListing);
-    return out;
-  }
-
-  // Caso E: data.data objeto listing único
-  if (data?.data && typeof data.data === 'object') {
-    console.log('[normalizeCalendarResponse] Format: data object');
-    processListing(data.data);
-    return out;
-  }
-
-  // Caso F: raíz objeto listing único
-  if (typeof data === 'object') {
-    console.log('[normalizeCalendarResponse] Format: root object');
-    processListing(data);
-    return out;
-  }
-
-  console.warn('[normalizeCalendarResponse] Unknown data format:', typeof data);
   return out;
 }
 
 /* =========================
- * Lógica de disponibilidad - MEJORADA CON CTA/CTD OPCIONAL
+ * Disponibilidad (CTA/CTD correcto)
  * ========================= */
 function isRangeAvailable(days, from, to, options = {}) {
-  // 🔥 OPCIONES CONFIGURABLES: Por defecto NO verificar CTA/CTD
-  const {
-    checkCTA = false,  // No verificar check-in allowed por defecto
-    checkCTD = false,  // No verificar check-out allowed por defecto
-    requireAllDays = true
-  } = options;
+  const { checkCTA = false, checkCTD = false, requireAllDays = true } = options;
 
-  if (!Array.isArray(days) || !isValidDate(from) || !isValidDate(to)) {
-    console.log(`[isRangeAvailable DEBUG] ❌ Invalid input: days=${days?.length}, from=${from}, to=${to}`);
-    return false;
-  }
+  if (!Array.isArray(days) || !isValidDate(from) || !isValidDate(to)) return false;
 
-  const needed = buildSetOfStayNights(from, to);
-  if (needed.size === 0) {
-    console.log(`[isRangeAvailable DEBUG] ❌ No nights needed`);
-    return false;
-  }
+  const stayNights = buildSetOfStayNights(from, to, { includeCheckout: false });
+  if (stayNights.size === 0) return false;
 
-  // Indexar por fecha
-  const byDate = new Map();
-  for (const d of days) {
-    if (d && d.date) {
-      byDate.set(d.date, d);
-    }
-  }
+  const byDate = new Map(days.filter(d => d?.date).map(d => [d.date, d]));
 
-  // 🐛 DEBUG: Ver qué días tenemos
-  if (days.length > 0) {
-    const firstDay = days[0];
-    console.log(`[isRangeAvailable DEBUG] Sample day:`, {
-      date: firstDay.date,
-      price: firstDay.price,
-      allotment: firstDay.allotment,
-      status: firstDay.status,
-      cta: firstDay.cta,
-      ctd: firstDay.ctd
-    });
-    console.log(`[isRangeAvailable DEBUG] Options: checkCTA=${checkCTA}, checkCTD=${checkCTD}`);
-    console.log(`[isRangeAvailable DEBUG] Total days: ${days.length}, Needed: ${needed.size}`);
-  }
-
-  // Verificar cada noche necesaria
-  let availableDays = 0;
-  for (const date of needed) {
+  // 1) availability SOLO noches
+  let availableNights = 0;
+  for (const date of stayNights) {
     const day = byDate.get(date);
-    
+
     if (!day) {
-      if (requireAllDays) {
-        console.log(`[isRangeAvailable] ❌ Missing date: ${date}`);
-        return false;
-      }
+      if (requireAllDays) return false;
       continue;
     }
 
-    // Verificar disponibilidad básica
     const allotment = Number.isFinite(day.allotment) ? day.allotment : null;
-    const isAvailable = allotment !== null 
-      ? allotment > 0 
-      : day.status === 'available';
+    const isAvailable = allotment !== null ? allotment > 0 : day.status === 'available';
+    if (!isAvailable) return false;
 
-    if (!isAvailable) {
-      console.log(`[isRangeAvailable] ❌ Unavailable date: ${date}, allotment: ${allotment}, status: ${day.status}`);
-      return false;
-    }
+    if (checkCTA && date === from && !day.cta) return false;
 
-    // ✅ OPCIONAL: Solo verificar CTA/CTD si está habilitado explícitamente
-    if (checkCTA && date === from && !day.cta) {
-      console.log(`[isRangeAvailable] ❌ Check-in restricted on ${date}`);
-      return false;
-    }
-    if (checkCTD && date === to && !day.ctd) {
-      console.log(`[isRangeAvailable] ❌ Check-out restricted on ${date}`);
-      return false;
-    }
-
-    availableDays++;
+    availableNights++;
   }
 
-  const isAvail = requireAllDays ? availableDays === needed.size : availableDays > 0;
-  console.log(`[isRangeAvailable] ✅ ${availableDays}/${needed.size} days available = ${isAvail}`);
-  return isAvail;
+  // 2) CTD SOLO mira checkout (sin exigir availability)
+  if (checkCTD) {
+    const checkoutDay = byDate.get(to);
+    if (!checkoutDay) return false;
+    if (!checkoutDay.ctd) return false;
+  }
+
+  return requireAllDays ? (availableNights === stayNights.size) : (availableNights > 0);
 }
 
 function computeNightlyFrom(days) {
   if (!Array.isArray(days)) return null;
-  
-  const prices = days
-    .map(d => d.price)
-    .filter(price => Number.isFinite(price) && price > 0);
-  
-  return prices.length > 0 ? Math.min(...prices) : null;
+  const prices = days.map(d => d.price).filter(p => Number.isFinite(p) && p > 0);
+  return prices.length ? Math.min(...prices) : null;
 }
 
 /* =========================
- * Fetch con backoff exponencial - MEJORADO
+ * Fetch con backoff + timeout
  * ========================= */
 async function fetchWithRetry(url, tries = MAX_RETRIES) {
   let lastErr;
 
   for (let attempt = 1; attempt <= tries; attempt++) {
     try {
-      const response = await guesty.get(url);
-      console.log(`[fetchWithRetry] ✅ Attempt ${attempt} successful`);
+      const response = await Promise.race([
+        guesty.get(url, { timeout: HTTP_TIMEOUT }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Timeout after ${HTTP_TIMEOUT}ms`)), HTTP_TIMEOUT + 100)
+        )
+      ]);
+
       return response;
     } catch (err) {
       lastErr = err;
       const status = err?.response?.status;
 
-      // No reintentar para errores 4xx (excepto 429)
-      if (status >= 400 && status < 500 && status !== 429) {
-        console.warn(`[fetchWithRetry] Client error ${status}, not retrying`);
-        throw err;
-      }
+      if (status >= 400 && status < 500 && status !== 429) throw err;
 
-      // Calcular delay con backoff exponencial + jitter
       if (attempt < tries) {
         const baseDelay = Math.min(MAX_DELAY_MS, BASE_DELAY_MS * Math.pow(2, attempt - 1));
         const jitter = Math.random() * 1000;
         const delay = baseDelay + jitter;
-
-        console.warn(`[fetchWithRetry] Attempt ${attempt} failed (${status}). Waiting ${Math.round(delay)}ms...`);
         await sleep(delay);
       }
     }
   }
 
-  console.error(`[fetchWithRetry] ❌ All ${tries} attempts failed`);
   throw lastErr;
 }
 
-/* =========================
- * SINGLE BATCH - MEJORADO CON DEBUG
- * ========================= */
-async function fetchBatch(ids, from, to) {
-  const batchId = Math.random().toString(36).substring(2, 8);
+async function fetchBatch(ids, from, to, opts = {}) {
+  if (!Array.isArray(ids) || ids.length === 0) throw new Error('IDs must be a non-empty array');
+  if (!isValidDate(from) || !isValidDate(to)) throw new Error('Invalid date range');
 
-  try {
-    console.log(`[fetchBatch:${batchId}] Requesting ${ids.length} listings from ${from} to ${to}`);
+  const queryParts = [];
+  ids.forEach(id => {
+    const cleanId = String(id).trim();
+    if (cleanId) queryParts.push(`listingIds[]=${encodeURIComponent(cleanId)}`);
+  });
 
-    // Validación de parámetros
-    if (!Array.isArray(ids) || ids.length === 0) {
-      throw new Error('IDs must be a non-empty array');
-    }
-    if (!isValidDate(from) || !isValidDate(to)) {
-      throw new Error('Invalid date range');
-    }
+  if (queryParts.length === 0) throw new Error('No valid IDs provided');
 
-    // Construir query string
-    const queryParts = [];
-    ids.forEach(id => {
-      const cleanId = String(id).trim();
-      if (cleanId) {
-        queryParts.push(`listingIds[]=${encodeURIComponent(cleanId)}`);
-      }
-    });
+  queryParts.push(`startDate=${encodeURIComponent(from)}`);
+  queryParts.push(`endDate=${encodeURIComponent(to)}`);
 
-    if (queryParts.length === 0) {
-      throw new Error('No valid IDs provided');
-    }
+  const url = `/v1/availability-pricing/api/calendar/listings?${queryParts.join('&')}`;
 
-    queryParts.push(`startDate=${encodeURIComponent(from)}`);
-    queryParts.push(`endDate=${encodeURIComponent(to)}`);
-
-    const queryString = queryParts.join('&');
-    const url = `/v1/availability-pricing/api/calendar/listings?${queryString}`;
-
-    console.log(`[fetchBatch:${batchId}] Fetching ${ids.length} listings`);
-
-    const response = await fetchWithRetry(url, MAX_RETRIES);
-
-    // 🐛 DEBUG TEMPORAL: Ver respuesta raw de Guesty
-    if (ids.length <= 3) {
-      console.log(`[fetchBatch:${batchId} DEBUG] Raw response sample:`, 
-        JSON.stringify(response.data, null, 2).slice(0, 1000)
-      );
-    }
-
-    const result = normalizeCalendarResponse(response.data);
-
-    console.log(`[fetchBatch:${batchId}] ✅ Success: ${result.length} listings returned`);
-
-    if (result.length === 0) {
-      console.warn(`[fetchBatch:${batchId}] ⚠️ Response returned 0 listings`);
-    }
-
-    return result;
-  } catch (err) {
-    const status = err?.response?.status;
-
-    if (err.message?.includes('OAuth bloqueado')) {
-      console.error(`[fetchBatch:${batchId}] OAuth bloqueado:`, err.message);
-    }
-
-    console.error(`[fetchBatch:${batchId}] ❌ Failed:`, {
-      status,
-      message: err?.message,
-      data: err?.response?.data
-    });
-
-    // Para errores de batch, retornar array vacío en lugar de fallar completamente
-    if (status >= 400 && status < 500) {
-      console.warn(`[fetchBatch:${batchId}] Returning empty result for failed batch`);
-      return [];
-    }
-
-    throw err;
-  }
+  const response = await fetchWithRetry(url, MAX_RETRIES);
+  return normalizeCalendarResponse(response.data, from, to, opts);
 }
 
 /* =========================
- * BATCH SUMMARY (listado) - MEJORADO CON CTA/CTD OPCIONAL
+ * getAvailabilityFor (stampede REAL pre-fetch)
  * ========================= */
 export async function getAvailabilityFor(ids, from, to) {
-  if (!Array.isArray(ids) || ids.length === 0) {
-    console.warn('[getAvailabilityFor] Empty or invalid IDs array');
-    return [];
+  if (!Array.isArray(ids) || ids.length === 0) return [];
+  if (!isValidDate(from) || !isValidDate(to)) return [];
+
+  const uniqueIds = [...new Set(ids.map(id => String(id).trim()).filter(Boolean))];
+  if (uniqueIds.length === 0) return [];
+
+  const hits = new Map();
+  const inflightWait = [];
+  const misses = [];
+
+  // 1) cache / inflight / miss
+  for (const id of uniqueIds) {
+    const key = listingAvailKey(id, from, to);
+
+    const cached = cacheGet(listingAvailCache, key);
+    if (cached) { hits.set(id, cached); continue; }
+
+    const inflight = listingAvailInflight.get(key);
+    if (inflight) { inflightWait.push({ id, promise: inflight }); continue; }
+
+    misses.push(id);
   }
 
-  if (!isValidDate(from) || !isValidDate(to)) {
-    console.warn('[getAvailabilityFor] Invalid date range:', { from, to });
-    return [];
+  // 2) Registrar inflight PARA LOS MISSES (ANTES DEL FETCH)
+  const missDeferred = new Map(); // id -> deferred
+  for (const id of misses) {
+    const key = listingAvailKey(id, from, to);
+    const d = createDeferred();
+    listingAvailInflight.set(key, d.promise);
+    missDeferred.set(id, d);
+
+    // cleanup inflight al terminar
+    d.promise.finally(() => {
+      setTimeout(() => listingAvailInflight.delete(key), 100);
+    });
   }
 
-  const key = keyOf(ids, from, to);
-  const cached = cacheGet(cache, key);
-  if (cached) {
-    console.log(`[getAvailabilityFor] ✅ Cache hit (${ids.length} listings)`);
-    return cached;
-  }
+  // 3) Fetch batches SOLO para misses (si hay)
+  let listingMap = new Map();
+  if (misses.length > 0) {
+    const limit = pLimit(CONCURRENT_REQUESTS);
+    const batches = chunk(misses, BATCH_SIZE);
 
-  if (inflight.has(key)) {
-    console.log(`[getAvailabilityFor] ⏳ Using inflight request (${ids.length} listings)`);
-    return inflight.get(key);
-  }
-
-  const promise = (async () => {
-    try {
-      // Limpiar IDs duplicados e inválidos
-      const uniqueIds = [...new Set(ids.map(id => String(id).trim()).filter(Boolean))];
-      
-      if (uniqueIds.length === 0) {
-        console.warn('[getAvailabilityFor] No valid IDs after cleaning');
-        return [];
-      }
-
-      console.log(`[getAvailabilityFor] Processing ${uniqueIds.length} unique listings from ${from} to ${to}`);
-
-      const limit = pLimit(CONCURRENT_REQUESTS);
-      const batches = chunk(uniqueIds, BATCH_SIZE);
-
-      console.log(`[getAvailabilityFor] Created ${batches.length} batches`);
-
-      const batchPromises = batches.map((batch, index) => 
+    const batchResults = await Promise.all(
+      batches.map((batch) =>
         limit(async () => {
-          console.log(`[getAvailabilityFor] Processing batch ${index + 1}/${batches.length} (${batch.length} listings)`);
           try {
-            return await fetchBatch(batch, from, to);
-          } catch (error) {
-            console.error(`[getAvailabilityFor] Batch ${index + 1} failed:`, error.message);
-            return []; // Retornar array vacío para batches fallidos
+            return await fetchBatch(batch, from, to, { includeCheckout: false });
+          } catch (e) {
+            if (DEBUG) console.error('[getAvailabilityFor] batch failed:', e?.message);
+            return [];
           }
         })
-      );
+      )
+    );
 
-      const batchResults = await Promise.all(batchPromises);
+    listingMap = new Map();
+    for (const batchResult of batchResults) {
+      for (const item of batchResult) {
+        if (item?.listingId) listingMap.set(item.listingId, Array.isArray(item.days) ? item.days : []);
+      }
+    }
+  }
 
-      // Consolidar resultados
-      const listingMap = new Map();
-      for (const batchResult of batchResults) {
-        for (const item of batchResult) {
-          if (item && item.listingId) {
-            listingMap.set(item.listingId, Array.isArray(item.days) ? item.days : []);
-          }
-        }
+  // 4) Resolver deferreds (calcular + cachear)
+  for (const id of misses) {
+    const key = listingAvailKey(id, from, to);
+    const d = missDeferred.get(id);
+
+    try {
+      const days = listingMap.get(id) || [];
+
+      const computed = {
+        available: isRangeAvailable(days, from, to, { checkCTA: false, checkCTD: false, requireAllDays: true }),
+        nightlyFrom: computeNightlyFrom(days),
+        daysCount: days.length,
+        hasRestrictions: days.some(x => !x.cta || !x.ctd),
+      };
+
+      cacheSet(listingAvailCache, key, computed, CACHE_TTL_MS);
+
+      if (days.length > 0) {
+        cacheSet(daysCache, daysKey(id, from, to, false), days, DAYS_TTL_MS);
       }
 
-      // Construir respuesta final con CTA/CTD DESHABILITADO
-      const result = uniqueIds.map(id => {
-        const days = listingMap.get(id) || [];
-        
-        // 🔥 NO verificar CTA/CTD en búsqueda de listado
-        const available = isRangeAvailable(days, from, to, {
-          checkCTA: false,  // Deshabilitado para búsqueda
-          checkCTD: false,  // Deshabilitado para búsqueda
-          requireAllDays: true
-        });
-        
-        // 🐛 DEBUG: Log primeras 3 propiedades
-        if (uniqueIds.indexOf(id) < 3) {
-          console.log(`[getAvailabilityFor DEBUG] Listing ${id}:`, {
-            daysCount: days.length,
-            available,
-            sampleDates: days.slice(0, 3).map(d => ({ 
-              date: d.date, 
-              status: d.status, 
-              allotment: d.allotment,
-              price: d.price,
-              cta: d.cta,    // Para debug
-              ctd: d.ctd     // Para debug
-            }))
-          });
-        }
-        
-        // Agregar info adicional para el frontend sobre restricciones
-        const hasRestrictions = days.some(d => !d.cta || !d.ctd);
-        
-        return {
-          listing_id: id,
-          available,
-          nightlyFrom: computeNightlyFrom(days),
-          daysCount: days.length,
-          hasRestrictions  // Info útil para el frontend
-        };
-      });
-
-      // Estadísticas de disponibilidad
-      const availableCount = result.filter(r => r.available).length;
-      const restrictedCount = result.filter(r => r.hasRestrictions).length;
-      console.log(`[getAvailabilityFor] 📊 Availability stats: ${availableCount}/${result.length} available`);
-      console.log(`[getAvailabilityFor] 📊 Restrictions stats: ${restrictedCount}/${result.length} have CTA/CTD restrictions`);
-
-      cacheSet(cache, key, result, CACHE_TTL_MS);
-      console.log(`[getAvailabilityFor] ✅ Completed processing ${result.length} listings`);
-
-      return result;
-    } catch (error) {
-      console.error('[getAvailabilityFor] ❌ Critical error:', error);
-      throw error;
-    } finally {
-      inflight.delete(key);
+      d.resolve(computed);
+    } catch (e) {
+      d.resolve({ available: false, nightlyFrom: null, daysCount: 0, hasRestrictions: false });
     }
-  })();
+  }
 
-  inflight.set(key, promise);
-  return promise;
+  // 5) Esperar inflight que venían de antes (en paralelo)
+  const inflightResults = new Map();
+  if (inflightWait.length > 0) {
+    const pairs = await Promise.all(
+      inflightWait.map(async ({ id, promise }) => {
+        try { return [id, await promise]; }
+        catch { return [id, { available: false, nightlyFrom: null, daysCount: 0, hasRestrictions: false }]; }
+      })
+    );
+    pairs.forEach(([id, r]) => inflightResults.set(id, r));
+  }
+
+  // 6) Armar respuesta final (hits + inflight + recién resueltos)
+  return uniqueIds.map(id => {
+    if (hits.has(id)) return { listing_id: id, ...hits.get(id) };
+    if (inflightResults.has(id)) return { listing_id: id, ...inflightResults.get(id) };
+
+    const cached = cacheGet(listingAvailCache, listingAvailKey(id, from, to));
+    if (cached) return { listing_id: id, ...cached };
+
+    return { listing_id: id, available: false, nightlyFrom: null, daysCount: 0, hasRestrictions: false };
+  });
 }
 
 /* =========================
- * DAYS cache para detalle - MEJORADO CON OPCIONES FLEXIBLES
+ * getDaysForListing (cache key incluye checkout)
  * ========================= */
 export async function getDaysForListing(id, from, to, options = {}) {
-  if (!id || !isValidDate(from) || !isValidDate(to)) {
-    console.warn('[getDaysForListing] Invalid parameters:', { id, from, to });
-    return [];
-  }
+  if (!id || !isValidDate(from) || !isValidDate(to)) return [];
 
   const cleanId = String(id).trim();
-  const key = daysKey(cleanId, from, to);
-  
-  const cached = cacheGet(daysCache, key);
-  if (cached) {
-    console.log(`[getDaysForListing] ✅ Cache hit for ${cleanId}`);
-    return cached;
-  }
+  const includeCheckout = !!options.includeCheckout;
+  const key = daysKey(cleanId, from, to, includeCheckout);
 
-  if (daysInflight.has(key)) {
-    console.log(`[getDaysForListing] ⏳ Using inflight request for ${cleanId}`);
-    return daysInflight.get(key);
-  }
+  const cached = cacheGet(daysCache, key);
+  if (cached) return cached;
+
+  if (daysInflight.has(key)) return daysInflight.get(key);
 
   const promise = (async () => {
     try {
-      console.log(`[getDaysForListing] Fetching days for ${cleanId} from ${from} to ${to}`);
-      
-      const batchResult = await fetchBatch([cleanId], from, to);
-      const entry = Array.isArray(batchResult) 
+      const batchResult = await fetchBatch([cleanId], from, to, { includeCheckout });
+      const entry = Array.isArray(batchResult)
         ? batchResult.find(x => String(x.listingId) === cleanId)
         : null;
-      
+
       const days = (entry && Array.isArray(entry.days)) ? entry.days : [];
-
-      // DEBUG para días individuales
-      if (days.length > 0) {
-        console.log(`[getDaysForListing DEBUG] First 3 days for ${cleanId}:`, 
-          days.slice(0, 3).map(d => ({
-            date: d.date,
-            status: d.status,
-            allotment: d.allotment,
-            price: d.price,
-            cta: d.cta,
-            ctd: d.ctd
-          }))
-        );
-      }
-
       cacheSet(daysCache, key, days, DAYS_TTL_MS);
-      console.log(`[getDaysForListing] ✅ Fetched ${days.length} days for ${cleanId}`);
-
       return days;
-    } catch (error) {
-      console.error(`[getDaysForListing] ❌ Failed to fetch days for ${cleanId}:`, error);
-      return []; // Retornar array vacío en caso de error
+    } catch (e) {
+      return [];
     } finally {
       daysInflight.delete(key);
     }
@@ -678,44 +497,53 @@ export async function getDaysForListing(id, from, to, options = {}) {
 }
 
 /* =========================
- * Función específica para verificación estricta (para booking)
+ * Booking estricto (CTA/CTD)
  * ========================= */
 export async function checkStrictAvailability(id, from, to) {
-  const days = await getDaysForListing(id, from, to);
-  
-  // Para booking final, SÍ verificar CTA/CTD
-  return isRangeAvailable(days, from, to, {
-    checkCTA: true,   // Habilitado para booking
-    checkCTD: true,   // Habilitado para booking
-    requireAllDays: true
-  });
+  const days = await getDaysForListing(id, from, to, { includeCheckout: true });
+  return isRangeAvailable(days, from, to, { checkCTA: true, checkCTD: true, requireAllDays: true });
 }
 
 /* =========================
- * Utilidades adicionales
+ * Purge expirados
  * ========================= */
-
-// Limpiar caches manualmente
-export function clearCache() {
-  cache.clear();
-  daysCache.clear();
-  console.log('[clearCache] All caches cleared');
+function purgeExpired(cacheMap) {
+  const now = Date.now();
+  for (const [k, entry] of cacheMap.entries()) {
+    if (entry?.expires && now > entry.expires) cacheMap.delete(k);
+  }
 }
 
-// Estadísticas de cache
+if (typeof setInterval !== 'undefined') {
+  const interval = setInterval(() => {
+    purgeExpired(listingAvailCache);
+    purgeExpired(daysCache);
+  }, 60000);
+  if (interval.unref) interval.unref();
+}
+
+/* =========================
+ * Utils
+ * ========================= */
+export function clearCache() {
+  listingAvailCache.clear();
+  daysCache.clear();
+  listingAvailInflight.clear();
+  daysInflight.clear();
+}
+
 export function getCacheStats() {
   return {
-    availability: {
-      size: cache.size,
-      keys: Array.from(cache.keys())
-    },
-    days: {
-      size: daysCache.size,
-      keys: Array.from(daysCache.keys())
-    },
-    inflight: {
-      availability: inflight.size,
-      days: daysInflight.size
-    }
+    listingAvailCache: listingAvailCache.size,
+    daysCache: daysCache.size,
+    listingAvailInflight: listingAvailInflight.size,
+    daysInflight: daysInflight.size
+  };
+}
+
+export function getPerformanceStats() {
+  return {
+    config: { BATCH_SIZE, CONCURRENT_REQUESTS, MAX_RETRIES, HTTP_TIMEOUT, DEBUG },
+    cacheStats: getCacheStats()
   };
 }
