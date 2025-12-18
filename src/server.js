@@ -18,6 +18,7 @@ import advisorsRoutes from './routes/advisors.routes.js';
 import propertyManagersRoutes from './routes/propertyManagers.routes.js';
 import publicMessagesRouter from './routes/public-messages.routes.js';
 import cartRoutes from './routes/cart.routes.js';
+import earlyAccessRoutes from './routes/early-access.routes.js';
 
 const app = express();
 
@@ -47,7 +48,7 @@ app.use('/badges', badgesRoutes);
 app.use('/advisors', advisorsRoutes);
 app.use('/property-managers', propertyManagersRoutes);
 app.use('/cart', cartRoutes);
-
+app.use('/early-access', earlyAccessRoutes);
 // Rutas protegidas
 app.use('/auth', authRoutes);
 app.use('/admin', adminRoutes);
