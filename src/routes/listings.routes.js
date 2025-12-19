@@ -7,15 +7,17 @@ import { getAvailabilityFor } from '../services/availability.service.js';
 
 const r = Router();
 
-// ✅ Configuración optimizada
-const MAX_AVAILABILITY_ITEMS = 200; // Procesar máximo 200 villas para availability
+// ✅ Configuración OPTIMIZADA para lazy scanning
 const AVAILABILITY_SESSION_TTL = 600000; // 10 minutos
-const AVAILABILITY_TIMEOUT_MS = 45000; // 45 segundos máximo
-const AVAILABILITY_BATCH_SIZE = 30; // Procesar en batches de 30
-const CONCURRENT_BATCHES = 4; // 4 batches en paralelo
+const LAZY_SCAN_CHUNK = 60;             // Candidatos por ciclo de escaneo
+const AV_BATCH_SIZE = 15;               // Batch size reducido
+const AV_CONCURRENCY = 2;               // Máximo 2 consultas concurrentes
+const MAX_SCAN_ITEMS = 1000;            // Límite máximo de candidatos a escanear
+const HARD_DEADLINE_MS = 8000;          // 8 segundos máximo por request
+const BUFFER_FACTOR = 3;                // Buffer de 3x para evitar paginación vacía
 
 /************************************************************
- * GET /listings (PRIVADO – admin/TA/PMC) - PAGINACIÓN LIMPIA
+ * GET /listings (PRIVADO – admin/TA/PMC) - PAGINACIÓN OPTIMIZADA
  ************************************************************/
 r.get('/', auth(false), async (req, res) => {
   try {
@@ -263,158 +265,166 @@ r.get('/', auth(false), async (req, res) => {
     }
 
     /***********************
-     * AVAILABILITY MODE - PAGINACIÓN CON SESIÓN
+     * AVAILABILITY MODE - LAZY SCANNING OPTIMIZADO
      ***********************/
     
-    // ✅ PÁGINA 1: Crear sesión nueva
-    if (currentPage === 1 || !availabilitySession) {
-      console.log(`🔍 [Availability] Creating new session for page 1`);
+    // ✅ Función para gestionar sesiones de availability
+    const ensureAvailabilitySession = async () => {
+      const needed = currentPage * lim;
       
-      // Obtener candidatos (limitar a MAX_AVAILABILITY_ITEMS)
-      const idsSQL = `
-        SELECT l.listing_id AS id
-        FROM listings l
-        ${whereSQL}
-        ${orderSQL}
-        LIMIT ${MAX_AVAILABILITY_ITEMS};
-      `;
-      const idsRes = await pool.query(idsSQL, params);
-      const candidateIds = idsRes.rows.map(r => r.id);
-
-      console.log(`📊 [Availability] Processing ${candidateIds.length} candidates (max ${MAX_AVAILABILITY_ITEMS})`);
+      // Si es página 1 o no hay sesión, crear nueva
+      if (currentPage === 1 || !availabilitySession) {
+        const sessionId = `av_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+        
+        const session = {
+          availableIds: [],
+          cursor: 0,
+          exhausted: false,
+          checkIn,
+          checkOut,
+          whereSQL,
+          orderSQL,
+          params: [...params], // Copia de parámetros
+          filters: { searchTerm, badgeSlugs, sort },
+          createdAt: Date.now(),
+          lastAccessed: Date.now()
+        };
+        
+        cache.set(`availability:${sessionId}`, session, AVAILABILITY_SESSION_TTL);
+        return { session, sessionId, isNew: true };
+      }
       
-      // Procesar availability en batches concurrentes
-      const availableIds = [];
+      // Usar sesión existente
+      const session = cache.get(`availability:${availabilitySession}`);
+      if (!session) {
+        throw new Error('Availability session expired');
+      }
       
-      try {
-        const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('TIMEOUT')), AVAILABILITY_TIMEOUT_MS);
-        });
-
-        const processPromise = (async () => {
-          for (let i = 0; i < candidateIds.length; i += AVAILABILITY_BATCH_SIZE * CONCURRENT_BATCHES) {
-            const batchPromises = [];
+      // Actualizar tiempo de acceso
+      session.lastAccessed = Date.now();
+      cache.set(`availability:${availabilitySession}`, session, AVAILABILITY_SESSION_TTL);
+      
+      return { session, sessionId: availabilitySession, isNew: false };
+    };
+    
+    // ✅ Obtener o crear sesión
+    const { session, sessionId, isNew } = await ensureAvailabilitySession();
+    
+    // Si la sesión es nueva o necesitamos más resultados, hacer lazy scanning
+    if (isNew || session.availableIds.length < (currentPage * lim)) {
+      const needed = currentPage * lim;
+      const hardDeadline = Date.now() + HARD_DEADLINE_MS;
+      
+      console.log(`🔍 [LazyScan] Session ${sessionId.slice(0, 12)}: needed ${needed}, have ${session.availableIds.length}, cursor ${session.cursor}`);
+      
+      // Escaneo incremental
+      while (
+        session.availableIds.length < needed && 
+        !session.exhausted && 
+        Date.now() < hardDeadline &&
+        session.cursor < MAX_SCAN_ITEMS
+      ) {
+        // 1️⃣ Traer el siguiente chunk de candidatos
+        const idsSQL = `
+          SELECT l.listing_id AS id
+          FROM listings l
+          ${whereSQL}
+          ${orderSQL}
+          LIMIT ${LAZY_SCAN_CHUNK} OFFSET ${session.cursor};
+        `;
+        
+        const idsRes = await pool.query(idsSQL, session.params);
+        const candidateIds = idsRes.rows.map(r => r.id);
+        
+        if (candidateIds.length === 0) {
+          session.exhausted = true;
+          break;
+        }
+        
+        session.cursor += candidateIds.length;
+        
+        // 2️⃣ Verificar disponibilidad en batches controlados
+        const availableInChunk = [];
+        
+        // Procesar batches con concurrencia controlada
+        for (let i = 0; i < candidateIds.length; i += AV_BATCH_SIZE * AV_CONCURRENCY) {
+          const batchPromises = [];
+          
+          for (let j = 0; j < AV_CONCURRENCY; j++) {
+            const startIdx = i + (j * AV_BATCH_SIZE);
+            if (startIdx >= candidateIds.length) break;
             
-            for (let j = 0; j < CONCURRENT_BATCHES; j++) {
-              const startIdx = i + (j * AVAILABILITY_BATCH_SIZE);
-              if (startIdx >= candidateIds.length) break;
-              
-              const batchIds = candidateIds.slice(startIdx, startIdx + AVAILABILITY_BATCH_SIZE);
-              if (batchIds.length > 0) {
-                batchPromises.push(
-                  getAvailabilityFor(batchIds, checkIn, checkOut)
-                    .then(batchResult => {
-                      const batchAvailable = batchResult
-                        .filter(a => a.available)
-                        .map(a => a.listing_id);
-                      availableIds.push(...batchAvailable);
-                    })
-                    .catch(err => {
-                      console.warn(`[Availability] Batch failed:`, err.message);
-                    })
-                );
-              }
-            }
-            
-            if (batchPromises.length > 0) {
-              await Promise.all(batchPromises);
-            }
-            
-            // Early stop si tenemos suficientes
-            if (availableIds.length >= lim * 5) {
-              console.log(`✂️ [Availability] Early stop: ${availableIds.length} available`);
-              break;
+            const batchIds = candidateIds.slice(startIdx, startIdx + AV_BATCH_SIZE);
+            if (batchIds.length > 0) {
+              batchPromises.push(
+                getAvailabilityFor(batchIds, checkIn, checkOut)
+                  .then(batchResult => {
+                    const batchAvailable = batchResult
+                      .filter(a => a.available)
+                      .map(a => a.listing_id);
+                    return batchAvailable;
+                  })
+                  .catch(err => {
+                    console.warn(`[LazyScan] Batch failed:`, err.message);
+                    return [];
+                  })
+              );
             }
           }
-        })();
-
-        await Promise.race([processPromise, timeoutPromise]);
-      } catch (err) {
-        if (err.message === 'TIMEOUT') {
-          console.warn(`⏱️ [Availability] Timeout after ${AVAILABILITY_TIMEOUT_MS}ms, using ${availableIds.length} results`);
-        } else {
-          throw err;
+          
+          if (batchPromises.length > 0) {
+            const batchResults = await Promise.all(batchPromises);
+            batchResults.forEach(result => {
+              availableInChunk.push(...result);
+            });
+          }
+          
+          // Early stop dentro del chunk si ya tenemos suficientes
+          if (session.availableIds.length + availableInChunk.length >= needed + (lim * BUFFER_FACTOR)) {
+            console.log(`✂️ [LazyScan] Early stop in chunk: ${session.availableIds.length + availableInChunk.length} available`);
+            break;
+          }
+        }
+        
+        // 3️⃣ Acumular disponibles
+        session.availableIds.push(...availableInChunk);
+        
+        console.log(`📊 [LazyScan] Cursor: ${session.cursor}, Disponibles: ${session.availableIds.length}, Necesarios: ${needed}`);
+        
+        // Early stop global si ya tenemos suficiente buffer
+        if (session.availableIds.length >= needed + (lim * BUFFER_FACTOR)) {
+          console.log(`✅ [LazyScan] Buffer reached: ${session.availableIds.length} available`);
+          break;
         }
       }
-
-      // Crear sesión
-      const sessionId = `av_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-      cache.set(
-        `availability:${sessionId}`,
-        { availableIds, checkIn, checkOut, filters: { searchTerm, badgeSlugs, sort } },
-        AVAILABILITY_SESSION_TTL
-      );
-
-      // Obtener detalles de la página 1
-      const pageIds = availableIds.slice(0, lim);
-      const detailRows = await fetchDetails(pageIds, orderSQL, badgeSlugs, VILLANET_BADGE_FIELD_MAP);
-
-      const total = availableIds.length;
-      const totalPages = Math.ceil(total / lim);
-
-      console.log(`✅ [Availability] Session ${sessionId}: ${total} available, page 1/${totalPages}`);
-
-      return res.json({
-        results: normalizeResults(detailRows),
-        total,
-        limit: lim,
-        offset: 0,
-        currentPage: 1,
-        totalPages,
-        hasMore: totalPages > 1,
-        availabilityApplied: true,
-        availabilitySession: sessionId
-      });
+      
+      // Actualizar sesión en cache
+      session.lastAccessed = Date.now();
+      cache.set(`availability:${sessionId}`, session, AVAILABILITY_SESSION_TTL);
     }
-
-    // ✅ PÁGINAS 2+: Usar sesión existente
-    console.log(`📖 [Availability] Using existing session for page ${currentPage}`);
     
-    const session = cache.get(`availability:${availabilitySession}`);
-    if (!session) {
-      console.error(`❌ [Availability] Session ${availabilitySession} expired or not found`);
-      return res.status(400).json({ 
-        message: 'Availability session expired. Please refresh your search.',
-        expired: true
-      });
-    }
-
-    const { availableIds } = session;
-    const total = availableIds.length;
+    // ✅ Obtener IDs de la página actual (con orden preservado)
+    const pageIds = session.availableIds.slice(offset, offset + lim);
+    const detailRows = await fetchDetails(pageIds, badgeSlugs, VILLANET_BADGE_FIELD_MAP);
+    
+    // Calcular total y páginas (estimado para sesiones no exhaustas)
+    const total = session.exhausted ? session.availableIds.length : 
+                  Math.min(session.availableIds.length + (session.cursor / 2), MAX_SCAN_ITEMS);
     const totalPages = Math.ceil(total / lim);
-
-    // Validar página
-    if (currentPage > totalPages) {
-      console.warn(`⚠️ [Availability] Requested page ${currentPage} > totalPages ${totalPages}`);
-      return res.json({
-        results: [],
-        total,
-        limit: lim,
-        offset,
-        currentPage,
-        totalPages,
-        hasMore: false,
-        availabilityApplied: true,
-        availabilitySession
-      });
-    }
-
-    // Obtener IDs de la página actual
-    const pageIds = availableIds.slice(offset, offset + lim);
-    const detailRows = await fetchDetails(pageIds, orderSQL, badgeSlugs, VILLANET_BADGE_FIELD_MAP);
-
-    console.log(`✅ [Availability] Page ${currentPage}/${totalPages}, showing ${detailRows.length} items`);
-
+    
+    console.log(`✅ [Availability] Session ${sessionId.slice(0, 12)}: Page ${currentPage}/${totalPages}, Showing ${detailRows.length}, Total ~${total}`);
+    
     return res.json({
       results: normalizeResults(detailRows),
-      total,
+      total: Math.floor(total),
       limit: lim,
       offset,
       currentPage,
-      totalPages,
-      hasMore: currentPage < totalPages,
+      totalPages: Math.max(1, Math.floor(totalPages)),
+      hasMore: session.exhausted ? currentPage < totalPages : true,
       availabilityApplied: true,
-      availabilitySession
+      availabilitySession: sessionId,
+      exhausted: session.exhausted
     });
 
   } catch (err) {
@@ -517,12 +527,21 @@ r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) =>
 });
 
 /************************************************************
- * Helpers
+ * Helpers OPTIMIZADOS
  ************************************************************/
-async function fetchDetails(ids, orderSQL, badgeSlugs = [], VILLANET_BADGE_FIELD_MAP = {}) {
+
+/**
+ * Fetch details preservando el orden original
+ */
+async function fetchDetails(ids, badgeSlugs = [], VILLANET_BADGE_FIELD_MAP = {}) {
   if (!ids.length) return [];
   
-  let sql = `
+  // Usar WITH ORDINALITY para preservar el orden de los IDs
+  const sql = `
+    WITH ordered_ids AS (
+      SELECT id, ordinality
+      FROM unnest($1::text[]) WITH ORDINALITY AS t(id, ordinality)
+    )
     SELECT 
       l.listing_id AS id,
       l.name,
@@ -559,25 +578,36 @@ async function fetchDetails(ids, orderSQL, badgeSlugs = [], VILLANET_BADGE_FIELD
 
       COALESCE(l.hero_image_url, '') AS "heroImage",
       COALESCE(l.images_json, '[]'::jsonb) AS images_json,
-      l.updated_at
-    FROM listings l
-    WHERE l.listing_id = ANY($1)
+      l.updated_at,
+      oi.ordinality
+    FROM ordered_ids oi
+    JOIN listings l ON l.listing_id = oi.id
+    ${badgeSlugs.length > 0 ? buildBadgeFilters(badgeSlugs, VILLANET_BADGE_FIELD_MAP) : ''}
+    ORDER BY oi.ordinality;
   `;
-  
-  if (badgeSlugs.length > 0) {
-    const validSlugs = badgeSlugs.filter(slug => VILLANET_BADGE_FIELD_MAP[slug]);
-    validSlugs.forEach(slug => {
-      const fieldName = VILLANET_BADGE_FIELD_MAP[slug];
-      sql += ` AND l.${fieldName} = true`;
-    });
-  }
-  
-  sql += ` ${orderSQL};`;
   
   const { rows } = await pool.query(sql, [ids]);
   return rows;
 }
 
+/**
+ * Helper para construir filtros de badges
+ */
+function buildBadgeFilters(badgeSlugs, VILLANET_BADGE_FIELD_MAP) {
+  const validSlugs = badgeSlugs.filter(slug => VILLANET_BADGE_FIELD_MAP[slug]);
+  if (validSlugs.length === 0) return '';
+  
+  const conditions = validSlugs.map(slug => {
+    const fieldName = VILLANET_BADGE_FIELD_MAP[slug];
+    return `l.${fieldName} = true`;
+  });
+  
+  return `WHERE ${conditions.join(' AND ')}`;
+}
+
+/**
+ * Normalizar resultados
+ */
 function normalizeResults(rows) {
   const PLACEHOLDER = 'https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200';
   
@@ -591,8 +621,11 @@ function normalizeResults(rows) {
       return Boolean(value);
     };
     
+    // Remover el campo ordinality si existe
+    const { ordinality, ...rest } = r;
+    
     return {
-      ...r,
+      ...rest,
       rank: r.rank !== null ? Number(r.rank) : null,
       images_json: Array.isArray(r.images_json) ? r.images_json : [],
       heroImage:
