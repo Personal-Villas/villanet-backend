@@ -7,14 +7,11 @@ import { getAvailabilityFor } from '../services/availability.service.js';
 
 const r = Router();
 
-// ✅ Configuración OPTIMIZADA para lazy scanning
+// ✅ Configuración OPTIMIZADA para respuesta rápida
 const AVAILABILITY_SESSION_TTL = 600000; // 10 minutos
 const LAZY_SCAN_CHUNK = 60;             // Candidatos por ciclo de escaneo
 const AV_BATCH_SIZE = 15;               // Batch size reducido
 const AV_CONCURRENCY = 2;               // Máximo 2 consultas concurrentes
-const MAX_SCAN_ITEMS = 1000;            // Límite máximo de candidatos a escanear
-const HARD_DEADLINE_MS = 8000;          // 8 segundos máximo por request
-const BUFFER_FACTOR = 3;                // Buffer de 3x para evitar paginación vacía
 
 /************************************************************
  * GET /listings (PRIVADO – admin/TA/PMC) - PAGINACIÓN OPTIMIZADA
@@ -32,6 +29,7 @@ r.get('/', auth(false), async (req, res) => {
       badges = '',
       limit = '12',
       page = '1',
+      cursor = '0',
       sort = 'rank',
       availabilitySession = '',
       destination = '',
@@ -40,12 +38,12 @@ r.get('/', auth(false), async (req, res) => {
 
     const lim = Math.min(Math.max(parseInt(limit) || 12, 1), 100);
     const currentPage = Math.max(parseInt(page) || 1, 1);
-    const offset = (currentPage - 1) * lim;
+    const cursorPos = Math.max(parseInt(cursor) || 0, 0);
     
     // ✅ SOLO activar availability cuando ambos dates están completos
     const hasAvailabilityFilter = !!(checkIn && checkOut);
 
-    console.log(`📄 [Listings] Page ${currentPage}, limit ${lim}, offset ${offset}, availability: ${hasAvailabilityFilter}`);
+    console.log(`📄 [Listings] Page ${currentPage}, limit ${lim}, cursor ${cursorPos}, availability: ${hasAvailabilityFilter}`);
 
     // ✅ Cachear el mapeo de badges
     let VILLANET_BADGE_FIELD_MAP = cache.get('villanet_badge_map');
@@ -193,6 +191,7 @@ r.get('/', auth(false), async (req, res) => {
      * NO-DATES MODE (SIN AVAILABILITY) - PAGINACIÓN SIMPLE
      ***********************/
     if (!hasAvailabilityFilter) {
+      const offset = (currentPage - 1) * lim;
       const sql = `
         SELECT 
           l.listing_id AS id,
@@ -265,15 +264,15 @@ r.get('/', auth(false), async (req, res) => {
     }
 
     /***********************
-     * AVAILABILITY MODE - LAZY SCANNING OPTIMIZADO
+     * AVAILABILITY MODE - RESPUESTA RÁPIDA CON LO QUE TENGAMOS
      ***********************/
-    
+
+    const offset = cursorPos;
+    const neededEnd = offset + lim;
+
     // ✅ Función para gestionar sesiones de availability
     const ensureAvailabilitySession = async () => {
-      const needed = currentPage * lim;
-      
-      // Si es página 1 o no hay sesión, crear nueva
-      if (currentPage === 1 || !availabilitySession) {
+      if (cursorPos === 0 || !availabilitySession) {
         const sessionId = `av_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
         
         const session = {
@@ -284,7 +283,7 @@ r.get('/', auth(false), async (req, res) => {
           checkOut,
           whereSQL,
           orderSQL,
-          params: [...params], // Copia de parámetros
+          params: [...params],
           filters: { searchTerm, badgeSlugs, sort },
           createdAt: Date.now(),
           lastAccessed: Date.now()
@@ -294,59 +293,54 @@ r.get('/', auth(false), async (req, res) => {
         return { session, sessionId, isNew: true };
       }
       
-      // Usar sesión existente
       const session = cache.get(`availability:${availabilitySession}`);
       if (!session) {
         throw new Error('Availability session expired');
       }
       
-      // Actualizar tiempo de acceso
+      if (session.checkIn !== checkIn || session.checkOut !== checkOut) {
+        throw new Error('Availability session filters changed');
+      }
+      
       session.lastAccessed = Date.now();
       cache.set(`availability:${availabilitySession}`, session, AVAILABILITY_SESSION_TTL);
       
       return { session, sessionId: availabilitySession, isNew: false };
     };
-    
-    // ✅ Obtener o crear sesión
+
     const { session, sessionId, isNew } = await ensureAvailabilitySession();
-    
-    // Si la sesión es nueva o necesitamos más resultados, hacer lazy scanning
-    if (isNew || session.availableIds.length < (currentPage * lim)) {
-      const needed = currentPage * lim;
-      const hardDeadline = Date.now() + HARD_DEADLINE_MS;
+
+    // 🔥 ESTRATEGIA: Hacer UNA sola pasada de escaneo corta y devolver lo que tengamos
+    if (isNew || session.availableIds.length < neededEnd) {
+      console.log(`🔍 [FastScan] Session ${sessionId.slice(0, 12)}: needed ${neededEnd}, have ${session.availableIds.length}`);
       
-      console.log(`🔍 [LazyScan] Session ${sessionId.slice(0, 12)}: needed ${needed}, have ${session.availableIds.length}, cursor ${session.cursor}`);
+      // 1️⃣ Calcular cuánto necesitamos escanear (solo lo suficiente para esta página)
+      const scanTarget = Math.min(
+        neededEnd - session.availableIds.length + 10, // +10 de buffer
+        LAZY_SCAN_CHUNK
+      );
       
-      // Escaneo incremental
-      while (
-        session.availableIds.length < needed && 
-        !session.exhausted && 
-        Date.now() < hardDeadline &&
-        session.cursor < MAX_SCAN_ITEMS
-      ) {
-        // 1️⃣ Traer el siguiente chunk de candidatos
-        const idsSQL = `
-          SELECT l.listing_id AS id
-          FROM listings l
-          ${whereSQL}
-          ${orderSQL}
-          LIMIT ${LAZY_SCAN_CHUNK} OFFSET ${session.cursor};
-        `;
-        
-        const idsRes = await pool.query(idsSQL, session.params);
-        const candidateIds = idsRes.rows.map(r => r.id);
-        
-        if (candidateIds.length === 0) {
-          session.exhausted = true;
-          break;
-        }
-        
+      // 2️⃣ Traer candidatos SOLO para esta página
+      const idsSQL = `
+        SELECT l.listing_id AS id
+        FROM listings l
+        ${session.whereSQL}
+        ${session.orderSQL}
+        LIMIT ${scanTarget} OFFSET ${session.cursor};
+      `;
+      
+      const idsRes = await pool.query(idsSQL, session.params);
+      const candidateIds = idsRes.rows.map(r => r.id);
+      
+      if (candidateIds.length === 0) {
+        session.exhausted = true;
+      } else {
         session.cursor += candidateIds.length;
         
-        // 2️⃣ Verificar disponibilidad en batches controlados
+        // 3️⃣ Verificar disponibilidad EN UN SOLO BATCH (sin loop infinito)
         const availableInChunk = [];
         
-        // Procesar batches con concurrencia controlada
+        // Procesar en batches pequeños con concurrencia
         for (let i = 0; i < candidateIds.length; i += AV_BATCH_SIZE * AV_CONCURRENCY) {
           const batchPromises = [];
           
@@ -359,13 +353,12 @@ r.get('/', auth(false), async (req, res) => {
               batchPromises.push(
                 getAvailabilityFor(batchIds, checkIn, checkOut)
                   .then(batchResult => {
-                    const batchAvailable = batchResult
+                    return batchResult
                       .filter(a => a.available)
                       .map(a => a.listing_id);
-                    return batchAvailable;
                   })
                   .catch(err => {
-                    console.warn(`[LazyScan] Batch failed:`, err.message);
+                    console.warn(`[FastScan] Batch failed:`, err.message);
                     return [];
                   })
               );
@@ -378,53 +371,41 @@ r.get('/', auth(false), async (req, res) => {
               availableInChunk.push(...result);
             });
           }
-          
-          // Early stop dentro del chunk si ya tenemos suficientes
-          if (session.availableIds.length + availableInChunk.length >= needed + (lim * BUFFER_FACTOR)) {
-            console.log(`✂️ [LazyScan] Early stop in chunk: ${session.availableIds.length + availableInChunk.length} available`);
-            break;
-          }
         }
         
-        // 3️⃣ Acumular disponibles
         session.availableIds.push(...availableInChunk);
-        
-        console.log(`📊 [LazyScan] Cursor: ${session.cursor}, Disponibles: ${session.availableIds.length}, Necesarios: ${needed}`);
-        
-        // Early stop global si ya tenemos suficiente buffer
-        if (session.availableIds.length >= needed + (lim * BUFFER_FACTOR)) {
-          console.log(`✅ [LazyScan] Buffer reached: ${session.availableIds.length} available`);
-          break;
-        }
+        console.log(`📊 [FastScan] Scanned ${candidateIds.length}, found ${availableInChunk.length} available (total: ${session.availableIds.length})`);
       }
       
-      // Actualizar sesión en cache
+      // Actualizar sesión
       session.lastAccessed = Date.now();
       cache.set(`availability:${sessionId}`, session, AVAILABILITY_SESSION_TTL);
     }
-    
-    // ✅ Obtener IDs de la página actual (con orden preservado)
+
+    // 4️⃣ DEVOLVER LO QUE TENGAMOS AHORA (aunque sea menos de lo pedido)
     const pageIds = session.availableIds.slice(offset, offset + lim);
     const detailRows = await fetchDetails(pageIds, badgeSlugs, VILLANET_BADGE_FIELD_MAP);
-    
-    // Calcular total y páginas (estimado para sesiones no exhaustas)
-    const total = session.exhausted ? session.availableIds.length : 
-                  Math.min(session.availableIds.length + (session.cursor / 2), MAX_SCAN_ITEMS);
-    const totalPages = Math.ceil(total / lim);
-    
-    console.log(`✅ [Availability] Session ${sessionId.slice(0, 12)}: Page ${currentPage}/${totalPages}, Showing ${detailRows.length}, Total ~${total}`);
-    
+
+    const returned = detailRows.length;
+    const nextCursor = offset + returned;
+
+    // hasMore si NO está exhausto O si hay más IDs acumulados
+    const hasMore = !session.exhausted || nextCursor < session.availableIds.length;
+
+    console.log(`✅ [FastScan] Returning ${returned}/${lim} items, cursor ${cursorPos}→${nextCursor}, hasMore: ${hasMore}`);
+
     return res.json({
       results: normalizeResults(detailRows),
-      total: Math.floor(total),
-      limit: lim,
-      offset,
-      currentPage,
-      totalPages: Math.max(1, Math.floor(totalPages)),
-      hasMore: session.exhausted ? currentPage < totalPages : true,
       availabilityApplied: true,
       availabilitySession: sessionId,
-      exhausted: session.exhausted
+      cursor: offset,
+      nextCursor,
+      requested: lim,
+      returned,
+      partial: returned < lim && hasMore,
+      exhausted: session.exhausted,
+      totalScanned: session.cursor,
+      totalAvailable: session.availableIds.length
     });
 
   } catch (err) {
@@ -434,6 +415,13 @@ r.get('/', auth(false), async (req, res) => {
       return res.status(400).json({ 
         message: 'Availability session expired. Please refresh your search.',
         expired: true
+      });
+    }
+    
+    if (err.message === 'Availability session filters changed') {
+      return res.status(400).json({ 
+        message: 'Search filters changed. Starting new availability session.',
+        filtersChanged: true
       });
     }
     
