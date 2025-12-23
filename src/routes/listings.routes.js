@@ -7,14 +7,14 @@ import { getAvailabilityFor } from '../services/availability.service.js';
 
 const r = Router();
 
-// ✅ Configuración OPTIMIZADA para respuesta rápida
+// ✅ Configuración OPTIMIZADA IDÉNTICA a ruta pública
 const AVAILABILITY_SESSION_TTL = 600000; // 10 minutos
 const LAZY_SCAN_CHUNK = 60;             // Candidatos por ciclo de escaneo
 const AV_BATCH_SIZE = 15;               // Batch size reducido
 const AV_CONCURRENCY = 2;               // Máximo 2 consultas concurrentes
 
 /************************************************************
- * GET /listings (PRIVADO – admin/TA/PMC) - PAGINACIÓN OPTIMIZADA
+ * GET /listings (PRIVADO – admin/TA/PMC) - PAGINACIÓN OPTIMIZADA IDÉNTICA
  ************************************************************/
 r.get('/', auth(false), async (req, res) => {
   try {
@@ -40,12 +40,12 @@ r.get('/', auth(false), async (req, res) => {
     const currentPage = Math.max(parseInt(page) || 1, 1);
     const cursorPos = Math.max(parseInt(cursor) || 0, 0);
     
-    // ✅ SOLO activar availability cuando ambos dates están completos
+    // ✅ SOLO activar availability cuando ambos dates están completos (IDÉNTICO)
     const hasAvailabilityFilter = !!(checkIn && checkOut);
 
-    console.log(`📄 [Listings] Page ${currentPage}, limit ${lim}, cursor ${cursorPos}, availability: ${hasAvailabilityFilter}`);
+    console.log(`📄 [Listings Privado] Page ${currentPage}, limit ${lim}, cursor ${cursorPos}, availability: ${hasAvailabilityFilter}`);
 
-    // ✅ Cachear el mapeo de badges
+    // ✅ Cachear el mapeo de badges (COMPARTIDO)
     let VILLANET_BADGE_FIELD_MAP = cache.get('villanet_badge_map');
     
     if (!VILLANET_BADGE_FIELD_MAP) {
@@ -70,7 +70,7 @@ r.get('/', auth(false), async (req, res) => {
     }
 
     /***********************
-     * SQL FILTERS
+     * SQL FILTERS IDÉNTICOS
      ***********************/
     const clauses = [];
     const params = [];
@@ -173,7 +173,7 @@ r.get('/', auth(false), async (req, res) => {
     const whereSQL = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
     /***********************
-     * ORDERING
+     * ORDERING IDÉNTICO
      ***********************/
     let orderSQL = `ORDER BY l.updated_at DESC`;
 
@@ -188,7 +188,7 @@ r.get('/', auth(false), async (req, res) => {
     }
 
     /***********************
-     * NO-DATES MODE (SIN AVAILABILITY) - PAGINACIÓN SIMPLE
+     * NO-DATES MODE (SIN AVAILABILITY) - PAGINACIÓN SIMPLE IDÉNTICA
      ***********************/
     if (!hasAvailabilityFilter) {
       const offset = (currentPage - 1) * lim;
@@ -250,7 +250,7 @@ r.get('/', auth(false), async (req, res) => {
       const total = count.rows[0].total;
       const totalPages = Math.ceil(total / lim);
 
-      console.log(`✅ [No Availability] Page ${currentPage}/${totalPages}, showing ${rows.rows.length} items`);
+      console.log(`✅ [Privado - No Availability] Page ${currentPage}/${totalPages}, showing ${rows.rows.length} items`);
 
       return res.json({
         results: normalizeResults(rows.rows),
@@ -259,21 +259,22 @@ r.get('/', auth(false), async (req, res) => {
         offset,
         currentPage,
         totalPages,
-        hasMore: currentPage < totalPages
+        hasMore: currentPage < totalPages,
+        availabilityApplied: false
       });
     }
 
     /***********************
-     * AVAILABILITY MODE - RESPUESTA RÁPIDA CON LO QUE TENGAMOS
+     * AVAILABILITY MODE - FAST SCAN IDÉNTICO A RUTA PÚBLICA
      ***********************/
 
     const offset = cursorPos;
     const neededEnd = offset + lim;
 
-    // ✅ Función para gestionar sesiones de availability
+    // ✅ Función para gestionar sesiones de availability IDÉNTICA
     const ensureAvailabilitySession = async () => {
       if (cursorPos === 0 || !availabilitySession) {
-        const sessionId = `av_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+        const sessionId = `private_av_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
         
         const session = {
           availableIds: [],
@@ -289,11 +290,11 @@ r.get('/', auth(false), async (req, res) => {
           lastAccessed: Date.now()
         };
         
-        cache.set(`availability:${sessionId}`, session, AVAILABILITY_SESSION_TTL);
+        cache.set(`private_availability:${sessionId}`, session, AVAILABILITY_SESSION_TTL);
         return { session, sessionId, isNew: true };
       }
       
-      const session = cache.get(`availability:${availabilitySession}`);
+      const session = cache.get(`private_availability:${availabilitySession}`);
       if (!session) {
         throw new Error('Availability session expired');
       }
@@ -303,18 +304,18 @@ r.get('/', auth(false), async (req, res) => {
       }
       
       session.lastAccessed = Date.now();
-      cache.set(`availability:${availabilitySession}`, session, AVAILABILITY_SESSION_TTL);
+      cache.set(`private_availability:${availabilitySession}`, session, AVAILABILITY_SESSION_TTL);
       
       return { session, sessionId: availabilitySession, isNew: false };
     };
 
     const { session, sessionId, isNew } = await ensureAvailabilitySession();
 
-    // 🔥 ESTRATEGIA: Hacer UNA sola pasada de escaneo corta y devolver lo que tengamos
+    // 🔥 ESTRATEGIA IDÉNTICA: Fast Scan optimizado
     if (isNew || session.availableIds.length < neededEnd) {
-      console.log(`🔍 [FastScan] Session ${sessionId.slice(0, 12)}: needed ${neededEnd}, have ${session.availableIds.length}`);
+      console.log(`🔍 [Privado FastScan] Session ${sessionId.slice(0, 12)}: needed ${neededEnd}, have ${session.availableIds.length}`);
       
-      // 1️⃣ Calcular cuánto necesitamos escanear (solo lo suficiente para esta página)
+      // 1️⃣ Calcular cuánto necesitamos escanear
       const scanTarget = Math.min(
         neededEnd - session.availableIds.length + 10, // +10 de buffer
         LAZY_SCAN_CHUNK
@@ -340,7 +341,7 @@ r.get('/', auth(false), async (req, res) => {
         // 3️⃣ Verificar disponibilidad EN UN SOLO BATCH (sin loop infinito)
         const availableInChunk = [];
         
-        // Procesar en batches pequeños con concurrencia
+        // Procesar en batches pequeños con concurrencia IDÉNTICA
         for (let i = 0; i < candidateIds.length; i += AV_BATCH_SIZE * AV_CONCURRENCY) {
           const batchPromises = [];
           
@@ -358,7 +359,7 @@ r.get('/', auth(false), async (req, res) => {
                       .map(a => a.listing_id);
                   })
                   .catch(err => {
-                    console.warn(`[FastScan] Batch failed:`, err.message);
+                    console.warn(`[Privado FastScan] Batch failed:`, err.message);
                     return [];
                   })
               );
@@ -374,12 +375,12 @@ r.get('/', auth(false), async (req, res) => {
         }
         
         session.availableIds.push(...availableInChunk);
-        console.log(`📊 [FastScan] Scanned ${candidateIds.length}, found ${availableInChunk.length} available (total: ${session.availableIds.length})`);
+        console.log(`📊 [Privado FastScan] Scanned ${candidateIds.length}, found ${availableInChunk.length} available (total: ${session.availableIds.length})`);
       }
       
       // Actualizar sesión
       session.lastAccessed = Date.now();
-      cache.set(`availability:${sessionId}`, session, AVAILABILITY_SESSION_TTL);
+      cache.set(`private_availability:${sessionId}`, session, AVAILABILITY_SESSION_TTL);
     }
 
     // 4️⃣ DEVOLVER LO QUE TENGAMOS AHORA (aunque sea menos de lo pedido)
@@ -392,7 +393,7 @@ r.get('/', auth(false), async (req, res) => {
     // hasMore si NO está exhausto O si hay más IDs acumulados
     const hasMore = !session.exhausted || nextCursor < session.availableIds.length;
 
-    console.log(`✅ [FastScan] Returning ${returned}/${lim} items, cursor ${cursorPos}→${nextCursor}, hasMore: ${hasMore}`);
+    console.log(`✅ [Privado FastScan] Returning ${returned}/${lim} items, cursor ${cursorPos}→${nextCursor}, hasMore: ${hasMore}`);
 
     return res.json({
       results: normalizeResults(detailRows),
@@ -405,11 +406,15 @@ r.get('/', auth(false), async (req, res) => {
       partial: returned < lim && hasMore,
       exhausted: session.exhausted,
       totalScanned: session.cursor,
-      totalAvailable: session.availableIds.length
+      totalAvailable: session.availableIds.length,
+      currentPage: Math.floor(offset / lim) + 1,
+      totalPages: Math.ceil(session.availableIds.length / lim) || 1,
+      total: session.availableIds.length,
+      hasMore: hasMore
     });
 
   } catch (err) {
-    console.error('❌ Listings error:', err);
+    console.error('❌ [Privado API] Listings error:', err);
     
     if (err.message === 'Availability session expired') {
       return res.status(400).json({ 
@@ -440,12 +445,19 @@ r.get('/', auth(false), async (req, res) => {
 });
 
 /************************************************************
- * GET /listings/:id (PRIVADO – admin/TA/PMC)
+ * GET /listings/:id (PRIVADO – admin/TA/PMC) - Detalles completos
  ************************************************************/
 r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
   try {
     const { id } = req.params;
+    const cacheKey = `private:listing:${id}`;
 
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
+    // ✅ Incluir todos los campos como en la ruta pública
     const { rows } = await pool.query(
       `SELECT 
         listing_id,
@@ -505,17 +517,21 @@ r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) =>
       [id]
     );
 
-    if (!rows.length) return res.status(404).json({ message: 'Not found' });
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Listing not found' });
+    }
 
-    res.json(rows[0]);
+    const result = rows[0];
+    cache.set(cacheKey, result, 600000);
+    res.json(result);
   } catch (err) {
-    console.error('❌ Detail error:', err);
-    res.status(500).json({ message: 'Error fetching detail' });
+    console.error('[Privado API] Listing detail error:', err);
+    res.status(500).json({ message: err.message || 'Error fetching listing detail' });
   }
 });
 
 /************************************************************
- * Helpers OPTIMIZADOS
+ * Helpers OPTIMIZADOS IDÉNTICOS a ruta pública
  ************************************************************/
 
 /**
@@ -594,7 +610,7 @@ function buildBadgeFilters(badgeSlugs, VILLANET_BADGE_FIELD_MAP) {
 }
 
 /**
- * Normalizar resultados
+ * Normalizar resultados (IDÉNTICO a ruta pública)
  */
 function normalizeResults(rows) {
   const PLACEHOLDER = 'https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200';
