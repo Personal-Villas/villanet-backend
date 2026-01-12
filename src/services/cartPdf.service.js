@@ -383,11 +383,11 @@ export function generateCartPdf(listings, { clientName }) {
         if (villa.priceUSD != null) {
           const amount = Number(villa.priceUSD);
           if (!isNaN(amount)) {
-            const formatted = `$${(amount / 100).toLocaleString('en-US', { 
+            const formatted = `$${amount.toLocaleString('en-US', {
               minimumFractionDigits: 0,
-              maximumFractionDigits: 0 
+              maximumFractionDigits: 0,
             })}`;
-            
+        
             doc
               .fontSize(9)
               .font('Helvetica')
