@@ -34,6 +34,8 @@ app.use(
       'http://localhost:3000',
       'http://localhost:4000',
       'https://villanet-frontend.onrender.com',
+      'https://thevillanet.com',
+      'https://www.thevillanet.com',
     ],
     credentials: true,
   })

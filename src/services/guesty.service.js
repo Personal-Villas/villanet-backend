@@ -241,3 +241,42 @@ export function extractDetailFields(detail) {
   }
   return out;
 }
+
+
+//cambios
+export function extractLatLng(detail) {
+  // intenta varios paths comunes
+  const candidates = [
+    { lat: detail?.address?.lat, lng: detail?.address?.lng },
+    { lat: detail?.address?.latitude, lng: detail?.address?.longitude },
+    { lat: detail?.location?.lat, lng: detail?.location?.lng },
+    { lat: detail?.location?.latitude, lng: detail?.location?.longitude },
+    { lat: detail?.geo?.lat, lng: detail?.geo?.lng },
+    { lat: detail?.geo?.latitude, lng: detail?.geo?.longitude },
+  ];
+
+  for (const c of candidates) {
+    const lat = Number(c.lat);
+    const lng = Number(c.lng);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      return { lat, lng };
+    }
+  }
+
+  // caso: coordinates como array [lng, lat]
+  const coords =
+    detail?.address?.location?.coordinates ||
+    detail?.location?.coordinates ||
+    detail?.geo?.coordinates;
+
+  if (Array.isArray(coords) && coords.length >= 2) {
+    const lng = Number(coords[0]);
+    const lat = Number(coords[1]);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      return { lat, lng };
+    }
+  }
+
+  return { lat: null, lng: null };
+}
+

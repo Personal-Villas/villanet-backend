@@ -464,6 +464,8 @@ r.get('/:id', async (req, res) => {
         bathrooms,
         max_guests,
         price_usd,
+        lat,
+        lng,
 
         COALESCE(villanet_destination_tag, villanet_city, city) AS location,
 
