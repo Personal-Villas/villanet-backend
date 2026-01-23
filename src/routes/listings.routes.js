@@ -207,7 +207,7 @@ r.get('/', auth(false), async (req, res) => {
           l.villanet_city AS "villaNetCity",
           l.villanet_property_manager_name AS "villaNetPropertyManagerName",
           l.villanet_commission_rate AS "villaNetCommissionRate",
-
+          l.guesty_booking_domain AS "guestyBookingDomain",
           l.villanet_gated_community AS "villanetGatedCommunity",
           l.villanet_golf_villa AS "villanetGolfVilla",
           l.villanet_resort_villa AS "villanetResortVilla",
@@ -481,6 +481,7 @@ r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) =>
         villanet_destination_tag,
         villanet_city,
         villanet_property_manager_name,
+        guesty_booking_domain,
         villanet_partner_reservation_email,
         villanet_property_email,
         villanet_pmc_information,
@@ -562,7 +563,7 @@ async function fetchDetails(ids, badgeSlugs = [], VILLANET_BADGE_FIELD_MAP = {})
       l.villanet_city AS "villaNetCity",
       l.villanet_property_manager_name AS "villaNetPropertyManagerName",
       l.villanet_commission_rate AS "villaNetCommissionRate",
-
+      l.guesty_booking_domain AS "guestyBookingDomain",
       l.villanet_gated_community AS "villanetGatedCommunity",
       l.villanet_golf_villa AS "villanetGolfVilla",
       l.villanet_resort_villa AS "villanetResortVilla",

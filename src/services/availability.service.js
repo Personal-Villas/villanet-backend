@@ -547,3 +547,4 @@ export function getPerformanceStats() {
     cacheStats: getCacheStats()
   };
 }
+

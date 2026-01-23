@@ -19,6 +19,7 @@ import propertyManagersRoutes from './routes/propertyManagers.routes.js';
 import publicMessagesRouter from './routes/public-messages.routes.js';
 import cartRoutes from './routes/cart.routes.js';
 import earlyAccessRoutes from './routes/early-access.routes.js';
+import quotesRoutes from './routes/quotes.routes.js'
 
 const app = express();
 
@@ -60,6 +61,7 @@ app.use('/availability', availabilityRoutes);
 app.use('/properties', propertyBadgesRoutes);
 app.use('/admin/properties', adminPropertiesRoutes);
 app.use('/booking', bookingRoutes);
+app.use('/quotes', quotesRoutes);
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found', path: req.originalUrl });
 });
