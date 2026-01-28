@@ -338,6 +338,7 @@ async function fetchBatch(ids, from, to, opts = {}) {
   const url = `/v1/availability-pricing/api/calendar/listings?${queryParts.join('&')}`;
 
   const response = await fetchWithRetry(url, MAX_RETRIES);
+  
   return normalizeCalendarResponse(response.data, from, to, opts);
 }
 

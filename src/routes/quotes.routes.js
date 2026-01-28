@@ -7,18 +7,28 @@ import {
   getQuoteDetails,
   quotesAvailabilityCheck
 } from '../controllers/quotes.controller.js';
+import { calculateQuote } from "../controllers/quotes.controller.js";
+
 
 const router = Router();
 
 // Rutas protegidas para agentes de ventas (admin, ta, pmc)
+router.post(
+  '/availability-check',
+  auth(true),
+  requireRole('admin', 'ta', 'pmc'),
+  quotesAvailabilityCheck
+);
+router.post(
+  "/calculate",
+  auth(true),
+  requireRole("admin", "ta", "pmc"),
+  calculateQuote
+);
 router.post('/', auth(true), requireRole('admin', 'ta', 'pmc'), createQuote);
 router.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), getQuoteDetails);
 router.post('/:id/send', auth(true), requireRole('admin', 'ta', 'pmc'), sendQuoteEmail);
-router.post(
-    '/availability-check',
-    auth(true),
-    requireRole('admin', 'ta', 'pmc'),
-    quotesAvailabilityCheck
-  );
+
+
 
 export default router;

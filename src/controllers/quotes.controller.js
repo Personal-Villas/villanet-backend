@@ -2,6 +2,8 @@ import { pool } from '../db.js';
 import { sendEmail } from '../services/email.service.js';
 import { getAvailabilityFor, checkStrictAvailability } from '../services/availability.service.js';
 import pLimit from "p-limit";
+import { guesty } from "../services/guestyClient.js";
+import crypto from "crypto";
 
 // noches de estadía: from..to-1
 function countStayNights(from, to) {
@@ -895,4 +897,278 @@ export async function checkQuotesAvailability(req, res) {
       return res.status(500).json({ ok: false, error: 'Error interno', details: e.message });
     }
   }
-  
+
+// --- helpers ---
+function clampPct(x, min = 0, max = 100) {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return min;
+  return Math.min(max, Math.max(min, n));
+}
+
+function isYmd(s) {
+  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+}
+
+// ✅ NUEVO: Helper para redondeo a 2 decimales
+function money2(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.round(x * 100) / 100;
+}
+
+function sumByPred(items, pred) {
+  if (!Array.isArray(items)) return 0;
+  let total = 0;
+  for (const it of items) {
+    if (!it) continue;
+    if (!pred(it)) continue;
+
+    const amt =
+      Number(it.amount) ??
+      Number(it.total) ??
+      Number(it.value) ??
+      Number(it.price) ??
+      Number(it.netAmount) ??
+      Number(it.grossAmount) ??
+      Number(it.gross);
+
+    if (Number.isFinite(amt)) total += amt;
+  }
+  return total;
+}
+
+/**
+ * Parser definitivo - ajustado a la estructura REAL de tu response
+ */
+function parseGuestyQuote(raw) {
+  const q = raw?.data ?? raw ?? {};
+
+  // Búsqueda exhaustiva de invoiceItems - CORREGIDA con doble money
+  let invoiceItems = [];
+  invoiceItems =
+    q?.rates?.ratePlans?.[0]?.money?.money?.invoiceItems ||
+    q?.rates?.ratePlans?.[0]?.money?.invoiceItems ||
+    q?.rates?.ratePlans?.[0]?.invoiceItems ||
+    q?.money?.invoiceItems ||
+    q?.invoiceItems ||
+    q?.price?.invoiceItems ||
+    q?.priceBreakdown?.invoiceItems ||
+    [];
+
+  // Debug si no encuentra
+  if (invoiceItems.length === 0) {
+    console.log('[parseGuestyQuote] NO ENCONTRÓ invoiceItems. Rutas chequeadas:', {
+      doubleMoney: !!q?.rates?.ratePlans?.[0]?.money?.money?.invoiceItems,
+      ratePlansMoney: !!q?.rates?.ratePlans?.[0]?.money?.invoiceItems,
+      ratePlans: !!q?.rates?.ratePlans?.[0]?.invoiceItems,
+      money: !!q?.money?.invoiceItems,
+      root: !!q?.invoiceItems,
+      fullKeys: Object.keys(q)
+    });
+  }
+
+  // Base: accommodation fare / AF
+  const base = sumByPred(invoiceItems, (it) => {
+    const t = String(it.type || it.normalType || it.title || "").toLowerCase();
+    return (
+      t.includes("accommodation") ||
+      t.includes("fare") ||
+      it.normalType === "AF" ||
+      it.title?.toLowerCase().includes("accommodation fare")
+    );
+  });
+
+  // Cleaning
+  const cleaning = sumByPred(invoiceItems, (it) => {
+    const t = String(it.type || it.normalType || it.title || "").toLowerCase();
+    return t.includes("clean") || t.includes("cleaning");
+  });
+
+  // Taxes (incluye isTax y tipos con "tax")
+  const taxes = sumByPred(invoiceItems, (it) => {
+    const t = String(it.type || it.normalType || it.title || "").toLowerCase();
+    return t.includes("tax") || it.isTax === true || it.normalType === "LT" || it.normalType === "TAX";
+  });
+
+  // Otros fees
+  const otherFees = sumByPred(invoiceItems, (it) => {
+    const t = String(it.type || it.normalType || it.title || "").toLowerCase();
+    const isFee = t.includes("fee") || t.includes("service") || t.includes("resort");
+    return isFee && !t.includes("clean") && !t.includes("tax");
+  });
+
+  const currency =
+    invoiceItems[0]?.currency ||
+    q?.rates?.ratePlans?.[0]?.days?.[0]?.currency ||
+    q?.money?.currency ||
+    q?.currency ||
+    "USD";
+
+  // Log detallado con cada item
+  console.log('[parseGuestyQuote] Detected:', {
+    invoiceItemsCount: invoiceItems.length,
+    base,
+    cleaning,
+    taxes,
+    otherFees,
+    currency,
+    itemsFound: invoiceItems.map(it => ({
+      title: it.title || it.name || 'sin título',
+      amount: it.amount,
+      type: it.type || it.normalType || 'sin tipo',
+      isTax: it.isTax,
+      normalType: it.normalType
+    }))
+  });
+
+  return { currency, base, cleaning, taxes, otherFees, invoiceItems };
+}
+
+// helper sin truncado
+function safeJson(x) {
+  try {
+    return JSON.stringify(x, null, 2);
+  } catch {
+    return String(x);
+  }
+}
+
+// --- controller ---
+export async function calculateQuote(req, res) {
+  const requestId = `qcalc_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+
+  try {
+    const listingId = String(req.body?.listingId || "").trim();
+    const checkIn = String(req.body?.checkIn || "").trim();
+    const checkOut = String(req.body?.checkOut || "").trim();
+
+    const guestsCountRaw = Number(req.body?.guests ?? req.body?.guestsCount ?? 1);
+    const guestsCount = Number.isFinite(guestsCountRaw) ? Math.max(1, Math.floor(guestsCountRaw)) : 1;
+
+    // ✅ AJUSTE: Asegurar que commissionPct sea número válido
+    const commissionPct = clampPct(req.body?.commissionPct ?? 0);
+
+    console.log(`🧾 [${requestId}] /quotes/calculate incoming`, {
+      listingId,
+      checkIn,
+      checkOut,
+      guestsCount,
+      commissionPct,
+      userId: req.user?.id,
+    });
+
+    if (!listingId) return res.status(400).json({ ok: false, error: "listingId requerido" });
+    if (!isYmd(checkIn) || !isYmd(checkOut)) return res.status(400).json({ ok: false, error: "checkIn/checkOut deben ser YYYY-MM-DD" });
+    if (new Date(checkIn) >= new Date(checkOut)) return res.status(400).json({ ok: false, error: "checkOut debe ser posterior a checkIn" });
+
+    const nights = countStayNights(checkIn, checkOut);
+    if (nights <= 0) return res.status(400).json({ ok: false, error: "Rango inválido" });
+
+    let cacheKey = null;
+    try {
+      cacheKey = crypto.createHash("sha1").update(JSON.stringify({ listingId, checkIn, checkOut, guestsCount })).digest("hex");
+      console.log(`🧠 [${requestId}] cacheKey`, cacheKey);
+    } catch (e) {
+      console.warn(`⚠️ [${requestId}] cacheKey error`, e?.message);
+    }
+
+    const payload = {
+      listingId,
+      checkInDateLocalized: checkIn,
+      checkOutDateLocalized: checkOut,
+      guestsCount,
+      source: "villanet_calculator",
+      ignoreCalendar: false,
+      ignoreTerms: false,
+      ignoreBlocks: false,
+    };
+
+    console.log(`➡️ [${requestId}] Guesty Open API POST /v1/quotes payload`, payload);
+
+    let guestyResp;
+    try {
+      guestyResp = await guesty.post("/v1/quotes", payload);
+    } catch (e) {
+      const status = e?.response?.status;
+      console.error(`❌ [${requestId}] Guesty call failed`, { status, message: e?.message, data: safeJson(e?.response?.data) });
+
+      if (status === 400 || status === 422) {
+        const payload2 = { ...payload };
+        delete payload2.guestsCount;
+        payload2.guests = guestsCount;
+        console.log(`🔁 [${requestId}] Retry with guests`, payload2);
+        try {
+          guestyResp = await guesty.post("/v1/quotes", payload2);
+        } catch (e2) {
+          console.error(`❌ Retry failed`, { data: safeJson(e2?.response?.data) });
+          throw e2;
+        }
+      } else {
+        throw e;
+      }
+    }
+
+    console.log(`✅ [${requestId}] Guesty response`, {
+      status: guestyResp?.status,
+      topKeys: guestyResp?.data ? Object.keys(guestyResp.data) : [],
+      dataPreview: safeJson(guestyResp?.data),
+    });
+
+    const parsed = parseGuestyQuote(guestyResp?.data);
+
+    console.log(`🧩 [${requestId}] Parsed breakdown`, parsed);
+
+    const baseSubtotal = Number(parsed.base) || 0;
+    const cleaningFee = Number(parsed.cleaning) || 0;
+    const taxesTotal = Number(parsed.taxes) || 0;
+
+    const subtotal = baseSubtotal + cleaningFee + taxesTotal;
+    const commission = subtotal * (commissionPct / 100);
+    const totalGross = subtotal + commission;
+
+    // ✅ AJUSTE: Aplicar redondeo money2 a todos los valores monetarios
+    const response = {
+      ok: true,
+      currency: parsed.currency,
+      nights,
+      breakdown: {
+        base: money2(baseSubtotal),
+        cleaning: money2(cleaningFee),
+        taxes: money2(taxesTotal),
+        commissionPct,
+        commission: money2(commission),
+        totalGross: money2(totalGross),
+        otherFees: money2(parsed.otherFees || 0),
+      },
+      source: "guesty_quote",
+      ...(process.env.NODE_ENV === "development"
+        ? {
+            debug: {
+              requestId,
+              payloadSent: payload,
+              cacheKey,
+              invoiceItemsCount: parsed.invoiceItems?.length ?? 0,
+              guestyStatus: guestyResp?.status,
+            },
+          }
+        : {}),
+    };
+
+    console.log(`✅ [${requestId}] /quotes/calculate response`, response);
+    return res.json(response);
+  } catch (e) {
+    console.error(`🔥 [${requestId}] error FULL`, {
+      message: e?.message,
+      status: e?.response?.status,
+      data: safeJson(e?.response?.data),
+      stack: e?.stack,
+    });
+    return res.status(502).json({
+      ok: false,
+      error: "guesty_quote_failed",
+      message: "No se pudo calcular el quote con Guesty",
+      requestId,
+      ...(process.env.NODE_ENV === "development" ? { details: e?.response?.data || e.message } : {}),
+    });
+  }
+}
