@@ -115,14 +115,14 @@ r.get('/', async (req, res) => {
     // Bedrooms
     const bedroomsList = bedrooms.split(',').map(s => s.trim()).filter(Boolean);
     if (bedroomsList.length) {
-      if (bedroomsList.includes('5+')) {
-        clauses.push(`l.bedrooms >= 5`);
+      if (bedroomsList.includes('12+')) {
+        clauses.push(`l.bedrooms >= 12`);
       } else {
         const mins = bedroomsList.filter(v => /^\d+$/.test(v)).map(Number);
         if (mins.length) {
           const minBedrooms = Math.min(...mins);
           params.push(minBedrooms);
-          clauses.push(`l.bedrooms >= $${params.length}`);
+          clauses.push(`l.bedrooms = $${params.length}`);
         }
       }
     }
@@ -131,14 +131,14 @@ r.get('/', async (req, res) => {
     const bathroomsList = bathrooms.split(',').filter(Boolean);
     if (bathroomsList.length) {
       const nums = bathroomsList.filter(v => /^\d+$/.test(v)).map(Number);
-      const has5 = bathroomsList.includes('5+');
+      const has12 = bathroomsList.includes('12+');
 
       const ORs = [];
       if (nums.length) {
         params.push(nums);
         ORs.push(`l.bathrooms = ANY($${params.length}::int[])`);
       }
-      if (has5) ORs.push(`l.bathrooms >= 5`);
+      if (has12) ORs.push(`l.bathrooms >= 12`);
 
       clauses.push(`(${ORs.join(' OR ')})`);
     }
