@@ -1083,6 +1083,13 @@ export async function calculateQuote(req, res) {
       ignoreBlocks: false,
     };
 
+    // 🚨 AQUÍ VA EL LOG QUE PIDES - justo antes del POST
+    console.log("🚨 payload -> Guesty", payload, {
+      guestsCountType: typeof payload.guestsCount,
+      guestsCountValue: payload.guestsCount,
+      isInt: Number.isInteger(payload.guestsCount),
+    });
+
     console.log(`➡️ [${requestId}] Guesty Open API POST /v1/quotes payload`, payload);
 
     let guestyResp;
@@ -1166,7 +1173,7 @@ export async function calculateQuote(req, res) {
     return res.status(502).json({
       ok: false,
       error: "guesty_quote_failed",
-      message: "No se pudo calcular el quote con Guesty",
+      message: "Failed to connect to Guesty. Please check your connection and retry",
       requestId,
       ...(process.env.NODE_ENV === "development" ? { details: e?.response?.data || e.message } : {}),
     });
