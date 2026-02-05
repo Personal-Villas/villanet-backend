@@ -2,6 +2,18 @@ const DISCORD_WEBHOOK_ACCESS = process.env.DISCORD_WEBHOOK_ACCESS;
 const DISCORD_WEBHOOK_QUOTES = process.env.DISCORD_WEBHOOK_QUOTES;
 const TIMEOUT_MS = 5000;
 
+// ✅ NUEVO: Cargar whitelist desde .env
+const ACCESS_NOTIFICATION_WHITELIST = process.env.DISCORD_ACCESS_NOTIFICATION_WHITELIST
+  ? process.env.DISCORD_ACCESS_NOTIFICATION_WHITELIST
+      .split(',')
+      .map(email => email.trim().toLowerCase())
+  : [];
+
+// Log de whitelist al iniciar el servicio (para debugging)
+if (ACCESS_NOTIFICATION_WHITELIST.length > 0) {
+  console.log(`📋 Discord Access Notification Whitelist loaded: ${ACCESS_NOTIFICATION_WHITELIST.length} emails`);
+}
+
 /**
  * ============================================
  * SERVICIO CENTRAL DE NOTIFICACIONES DISCORD
@@ -12,6 +24,24 @@ const TIMEOUT_MS = 5000;
  * Logs detallados para debugging
  * Funciones puras separadas de I/O
  */
+
+/**
+ * ✅ NUEVO: Verifica si un email está en la whitelist
+ * @param {string} email - Email a verificar
+ * @returns {boolean} true si está en whitelist (no debe notificar)
+ */
+function isEmailWhitelisted(email) {
+  if (!email) return false;
+  
+  const normalizedEmail = String(email).toLowerCase().trim();
+  const isWhitelisted = ACCESS_NOTIFICATION_WHITELIST.includes(normalizedEmail);
+  
+  if (isWhitelisted) {
+    console.log(`🔇 Email in whitelist, skipping Discord notification: ${normalizedEmail}`);
+  }
+  
+  return isWhitelisted;
+}
 
 /**
  * Core function para enviar a Discord con timeout y error handling robusto
@@ -84,6 +114,15 @@ function formatTimestamp(date) {
  */
 export async function sendAccessNotification(data) {
   const { email, userExists, timestamp } = data;
+
+  // ✅ NUEVO: Verificar whitelist
+  if (isEmailWhitelisted(email)) {
+    return { 
+      success: false, 
+      reason: 'email_whitelisted',
+      message: 'Email in whitelist, notification skipped'
+    };
+  }
 
   const embed = {
     embeds: [
