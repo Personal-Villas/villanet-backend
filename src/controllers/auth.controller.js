@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
 import crypto from 'crypto';
 import { Roles, Status } from '../types.js';
+import { sendAccessNotification, notifySafely } from '../services/discordNotification.service.js'
 
 const ACCESS_TTL_MIN = Number(process.env.ACCESS_TTL_MIN || 15);
 const REFRESH_TTL_DAYS = Number(process.env.REFRESH_TTL_DAYS || 7);
@@ -156,6 +157,15 @@ export const AuthController = {
       console.log('📤 sendCode response:', { email: normalizedEmail, userExists: exists });
 
       await sendVerificationEmail(normalizedEmail, code);
+
+      // NUEVO: Notificación Discord (non-blocking)
+    notifySafely(() => 
+      sendAccessNotification({
+        email: normalizedEmail,
+        userExists: exists,
+        timestamp: new Date()
+      })
+    );
 
       console.log(`✅ Code sent successfully to ${normalizedEmail}`);
 
