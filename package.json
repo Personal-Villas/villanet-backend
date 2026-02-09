@@ -20,6 +20,7 @@
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
     "node-cache": "^5.1.2",
+    "node-cron": "^4.2.1",
     "nodemailer": "^7.0.10",
     "p-limit": "^7.2.0",
     "pdfkit": "^0.17.2",
