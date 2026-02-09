@@ -12,7 +12,7 @@ import { getGuestyAccessToken, forceRefreshGuestyToken } from './guestyAuth.js';
  */
 
 const raw = axios.create({
-  baseURL: 'https://open-api.guesty.com',
+  baseURL: 'https://open-api.guesty.com/v1',  // 🔄 Dominio antiguo + path moderno
   timeout: 20000,
   paramsSerializer: (params) => qs.stringify(params, { arrayFormat: 'brackets' }),
   headers: { Accept: 'application/json' },
