@@ -4,7 +4,6 @@ import { requireRole } from '../middleware/requireRole.js';
 import { pool } from '../db.js';
 import { cache } from '../cache.js';
 import { getAvailabilityFor } from '../services/availability.service.js';
-import { getRatesMap, applyRatesToRows } from "../services/ratesRead.service.js";
 
 const r = Router();
 
@@ -253,18 +252,8 @@ r.get('/', auth(false), async (req, res) => {
 
       console.log(`✅ [Privado - No Availability] Page ${currentPage}/${totalPages}, showing ${rows.rows.length} items`);
 
-      // ✅ INTEGRACIÓN DEL HELPER DE RATES (NO-DATES MODE) - CORREGIDO
-      const baseRows = rows.rows;
-      const listingIds = baseRows.map(x => x.id);
-      
-      // Obtener tarifas desde caché → DB → fallback
-      const ratesMap = await getRatesMap(listingIds);
-      
-      // Aplicar tarifas a los resultados
-      const enriched = applyRatesToRows(baseRows, ratesMap);
-
       return res.json({
-        results: normalizeResults(enriched),
+        results: normalizeResults(rows.rows),
         total,
         limit: lim,
         offset,
@@ -398,12 +387,7 @@ r.get('/', auth(false), async (req, res) => {
     const pageIds = session.availableIds.slice(offset, offset + lim);
     const detailRows = await fetchDetails(pageIds, badgeSlugs, VILLANET_BADGE_FIELD_MAP);
 
-    // ✅ INTEGRACIÓN DEL HELPER DE RATES (AVAILABILITY MODE) - CORREGIDO
-    const listingIds = detailRows.map(x => x.id);
-    const ratesMap = await getRatesMap(listingIds);
-    const enriched = applyRatesToRows(detailRows, ratesMap);
-
-    const returned = detailRows.length; // ✅ CORREGIDO: basado en detailRows
+    const returned = detailRows.length;
     const nextCursor = offset + returned;
 
     // hasMore si NO está exhausto O si hay más IDs acumulados
@@ -412,7 +396,7 @@ r.get('/', auth(false), async (req, res) => {
     console.log(`✅ [Privado FastScan] Returning ${returned}/${lim} items, cursor ${cursorPos}→${nextCursor}, hasMore: ${hasMore}`);
 
     return res.json({
-      results: normalizeResults(enriched),
+      results: normalizeResults(detailRows),
       availabilityApplied: true,
       availabilitySession: sessionId,
       cursor: offset,
@@ -541,27 +525,8 @@ r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) =>
     }
 
     const result = rows[0];
-
-    // ✅ ENRIQUECER CON RATES
-    const ratesMap = await getRatesMap([id]);
-    const enrichedArr = applyRatesToRows(
-      [{ ...result, id: result.listing_id, priceUSD: result.price_usd }],
-      ratesMap
-    );
-    const enriched = enrichedArr[0];
-
-    // ✅ PAYLOAD FINAL CON RATES
-    const payload = {
-      ...result,
-      priceUSD: enriched.priceUSD,
-      mandatoryFees: enriched.mandatoryFees,
-      rateUpdatedAt: enriched.rateUpdatedAt,
-      rateSource: enriched.rateSource,
-      originalCurrency: enriched.originalCurrency,
-    };
-
-    cache.set(cacheKey, payload, 600000);
-    res.json(payload);
+    cache.set(cacheKey, result, 600000);
+    res.json(result);
   } catch (err) {
     console.error('[Privado API] Listing detail error:', err);
     res.status(500).json({ message: err.message || 'Error fetching listing detail' });
