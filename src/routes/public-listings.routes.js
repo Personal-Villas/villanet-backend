@@ -93,6 +93,43 @@ r.get('/', async (req, res) => {
         l.villanet_city = $${idx} OR 
         l.city = $${idx} OR
         l.country = $${idx}
+    // Búsqueda unificada
+    let searchTerm = '';
+    
+    // 1. Lógica de Destino (Prioritaria y Estricta)
+    if (destination?.toString().trim()) {
+      // Normalizamos el input: quitamos puntos, pasamos a minúsculas y quitamos espacios extra
+      const cleanDest = destination.toString().trim().replace(/\./g, '').toLowerCase();
+      
+      params.push(`%${cleanDest}%`);
+      const idx = params.length;
+
+      // COMPARACIÓN INTELIGENTE:
+      // Usamos REPLACE(columna, '.', '') para ignorar el punto de la BD temporalmente.
+      // Usamos unaccent() para ignorar tildes.
+      // Y lo más importante: NO BUSCAMOS EN l.description ni l.name para evitar falsos positivos.
+      clauses.push(`(
+        unaccent(LOWER(REPLACE(l.villanet_destination_tag, '.', ''))) ILIKE unaccent($${idx}) OR 
+        unaccent(LOWER(REPLACE(l.villanet_city, '.', ''))) ILIKE unaccent($${idx}) OR 
+        unaccent(LOWER(REPLACE(l.city, '.', ''))) ILIKE unaccent($${idx}) OR
+        unaccent(LOWER(REPLACE(l.country, '.', ''))) ILIKE unaccent($${idx})
+      )`);
+
+    } else if (q?.toString().trim()) {
+      // 2. Búsqueda General (Solo si NO hay destino seleccionado)
+      // Aquí sí permitimos buscar en descripción y nombre.
+      const searchTerm = q.toString().trim();
+      params.push(`%${searchTerm.toLowerCase()}%`);
+      const idx = params.length;
+      
+      clauses.push(`(
+        unaccent(LOWER(l.name)) ILIKE unaccent($${idx}) OR 
+        unaccent(LOWER(l.villanet_destination_tag)) ILIKE unaccent($${idx}) OR 
+        unaccent(LOWER(l.villanet_city)) ILIKE unaccent($${idx}) OR
+        unaccent(LOWER(l.city)) ILIKE unaccent($${idx}) OR
+        unaccent(LOWER(l.country)) ILIKE unaccent($${idx}) OR
+        unaccent(LOWER(l.location_text)) ILIKE unaccent($${idx}) OR
+        unaccent(LOWER(l.description)) ILIKE unaccent($${idx})
       )`);
     }
 
