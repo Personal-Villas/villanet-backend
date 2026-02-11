@@ -73,31 +73,40 @@ r.get('/', async (req, res) => {
     const clauses = [];
     const params = [];
 
-    // Búsqueda unificada
-    let searchTerm = '';
-    
+    // Definimos searchTerm fuera de los IFs para que sea accesible en todo el scope de la ruta
+    const searchTerm = q?.toString().trim() || '';
+
+    // 1. FILTRO DE DESTINO (ESTRICTO)
     if (destination?.toString().trim()) {
-      searchTerm = destination.toString().trim();
-    } else if (q?.toString().trim()) {
-      searchTerm = q.toString().trim();
-    }
-    
-    if (searchTerm) {
-      const searchLower = `%${searchTerm.toLowerCase()}%`;
-      params.push(searchLower);
-      const idx = params.length;
+      const destValue = destination.toString().trim();
+      const isStBarts = destValue.toLowerCase().replace(/\./g, '') === 'St. Barts';
       
+      // Si es St Barts, usamos el valor exacto con punto de la BD
+      const finalDest = isStBarts ? 'St. Barts' : destValue;
+
+      params.push(finalDest);
+      const idx = params.length;
+
+      // Uso de = para evitar que St. Marteen se cuele en St. Barts
       clauses.push(`(
-        LOWER(l.name) ILIKE $${idx} OR 
-        LOWER(l.villanet_destination_tag) ILIKE $${idx} OR 
-        LOWER(l.villanet_city) ILIKE $${idx} OR
-        LOWER(l.city) ILIKE $${idx} OR
-        LOWER(l.country) ILIKE $${idx} OR
-        LOWER(l.location_text) ILIKE $${idx} OR
-        LOWER(l.description) ILIKE $${idx}
+        l.villanet_destination_tag = $${idx} OR 
+        l.villanet_city = $${idx} OR 
+        l.city = $${idx} OR
+        l.country = $${idx}
       )`);
     }
 
+    // 2. FILTRO DE BÚSQUEDA GENERAL (Q)
+    if (searchTerm) {
+      params.push(`%${searchTerm}%`);
+      const idx = params.length;
+      clauses.push(`(
+        unaccent(LOWER(l.name)) ILIKE unaccent($${idx}) OR 
+        unaccent(LOWER(l.location_text)) ILIKE unaccent($${idx}) OR 
+        unaccent(LOWER(l.description)) ILIKE unaccent($${idx})
+      )`);
+    }
+    
     // Filtro por badges
     const badgeSlugs = badges.split(',').filter(Boolean);
     
