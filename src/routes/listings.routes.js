@@ -1,53 +1,55 @@
-import { Router } from 'express';
-import { auth } from '../middleware/auth.js';
-import { requireRole } from '../middleware/requireRole.js';
-import { pool } from '../db.js';
-import { cache } from '../cache.js';
-import { getAvailabilityFor } from '../services/availability.service.js';
+import { Router } from "express";
+import { auth } from "../middleware/auth.js";
+import { requireRole } from "../middleware/requireRole.js";
+import { pool } from "../db.js";
+import { cache } from "../cache.js";
+import { getAvailabilityFor } from "../services/availability.service.js";
 
 const r = Router();
 
 // ✅ Configuración OPTIMIZADA IDÉNTICA a ruta pública
 const AVAILABILITY_SESSION_TTL = 600000; // 10 minutos
-const LAZY_SCAN_CHUNK = 60;             // Candidatos por ciclo de escaneo
-const AV_BATCH_SIZE = 15;               // Batch size reducido
-const AV_CONCURRENCY = 2;               // Máximo 2 consultas concurrentes
+const LAZY_SCAN_CHUNK = 60; // Candidatos por ciclo de escaneo
+const AV_BATCH_SIZE = 15; // Batch size reducido
+const AV_CONCURRENCY = 2; // Máximo 2 consultas concurrentes
 
 /************************************************************
  * GET /listings (PRIVADO – admin/TA/PMC) - PAGINACIÓN OPTIMIZADA IDÉNTICA
  ************************************************************/
-r.get('/', auth(false), async (req, res) => {
+r.get("/", auth(false), async (req, res) => {
   try {
     const {
-      q = '',
-      bedrooms = '',
-      bathrooms = '',
-      minPrice = '',
-      maxPrice = '',
-      checkIn = '',
-      checkOut = '',
-      badges = '',
-      limit = '12',
-      page = '1',
-      cursor = '0',
-      sort = 'rank',
-      availabilitySession = '',
-      destination = '',
-      guests = '', 
+      q = "",
+      bedrooms = "",
+      bathrooms = "",
+      minPrice = "",
+      maxPrice = "",
+      checkIn = "",
+      checkOut = "",
+      badges = "",
+      limit = "12",
+      page = "1",
+      cursor = "0",
+      sort = "rank",
+      availabilitySession = "",
+      destination = "",
+      guests = "",
     } = req.query;
 
     const lim = Math.min(Math.max(parseInt(limit) || 12, 1), 100);
     const currentPage = Math.max(parseInt(page) || 1, 1);
     const cursorPos = Math.max(parseInt(cursor) || 0, 0);
-    
+
     // ✅ SOLO activar availability cuando ambos dates están completos (IDÉNTICO)
     const hasAvailabilityFilter = !!(checkIn && checkOut);
 
-    console.log(`📄 [Listings Privado] Page ${currentPage}, limit ${lim}, cursor ${cursorPos}, availability: ${hasAvailabilityFilter}`);
+    console.log(
+      `📄 [Listings Privado] Page ${currentPage}, limit ${lim}, cursor ${cursorPos}, availability: ${hasAvailabilityFilter}`,
+    );
 
     // ✅ Cachear el mapeo de badges (COMPARTIDO)
-    let VILLANET_BADGE_FIELD_MAP = cache.get('villanet_badge_map');
-    
+    let VILLANET_BADGE_FIELD_MAP = cache.get("villanet_badge_map");
+
     if (!VILLANET_BADGE_FIELD_MAP) {
       const { rows: villaNetBooleanFields } = await pool.query(`
         SELECT column_name
@@ -60,13 +62,13 @@ r.get('/', auth(false), async (req, res) => {
       `);
 
       VILLANET_BADGE_FIELD_MAP = {};
-      villaNetBooleanFields.forEach(field => {
+      villaNetBooleanFields.forEach((field) => {
         const fieldName = field.column_name;
-        const slug = fieldName.replace('villanet_', '').replace(/_/g, '-');
+        const slug = fieldName.replace("villanet_", "").replace(/_/g, "-");
         VILLANET_BADGE_FIELD_MAP[slug] = fieldName;
       });
 
-      cache.set('villanet_badge_map', VILLANET_BADGE_FIELD_MAP, 3600000);
+      cache.set("villanet_badge_map", VILLANET_BADGE_FIELD_MAP, 3600000);
     }
 
     /***********************
@@ -76,19 +78,19 @@ r.get('/', auth(false), async (req, res) => {
     const params = [];
 
     // Búsqueda unificada
-    let searchTerm = '';
-    
+    let searchTerm = "";
+
     if (destination?.toString().trim()) {
       searchTerm = destination.toString().trim();
     } else if (q?.toString().trim()) {
       searchTerm = q.toString().trim();
     }
-    
+
     if (searchTerm) {
       const searchLower = `%${searchTerm.toLowerCase()}%`;
       params.push(searchLower);
       const idx = params.length;
-      
+
       clauses.push(`(
         LOWER(l.name) ILIKE $${idx} OR 
         LOWER(l.villanet_destination_tag) ILIKE $${idx} OR 
@@ -101,13 +103,15 @@ r.get('/', auth(false), async (req, res) => {
     }
 
     // Filtro por badges
-    const badgeSlugs = badges.split(',').filter(Boolean);
-    
+    const badgeSlugs = badges.split(",").filter(Boolean);
+
     if (badgeSlugs.length > 0) {
-      const validSlugs = badgeSlugs.filter(slug => VILLANET_BADGE_FIELD_MAP[slug]);
-      
+      const validSlugs = badgeSlugs.filter(
+        (slug) => VILLANET_BADGE_FIELD_MAP[slug],
+      );
+
       if (validSlugs.length > 0) {
-        validSlugs.forEach(slug => {
+        validSlugs.forEach((slug) => {
           const fieldName = VILLANET_BADGE_FIELD_MAP[slug];
           clauses.push(`l.${fieldName} = true`);
         });
@@ -115,12 +119,15 @@ r.get('/', auth(false), async (req, res) => {
     }
 
     // Bedrooms
-    const bedroomsList = bedrooms.split(',').map(s => s.trim()).filter(Boolean);
+    const bedroomsList = bedrooms
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
     if (bedroomsList.length) {
-      if (bedroomsList.includes('12+')) {
+      if (bedroomsList.includes("12+")) {
         clauses.push(`l.bedrooms >= 12`);
       } else {
-        const mins = bedroomsList.filter(v => /^\d+$/.test(v)).map(Number);
+        const mins = bedroomsList.filter((v) => /^\d+$/.test(v)).map(Number);
         if (mins.length) {
           const minBedrooms = Math.min(...mins);
           params.push(minBedrooms);
@@ -130,10 +137,10 @@ r.get('/', auth(false), async (req, res) => {
     }
 
     // Bathrooms
-    const bathroomsList = bathrooms.split(',').filter(Boolean);
+    const bathroomsList = bathrooms.split(",").filter(Boolean);
     if (bathroomsList.length) {
-      const nums = bathroomsList.filter(v => /^\d+$/.test(v)).map(Number);
-      const has12 = bathroomsList.includes('12+');
+      const nums = bathroomsList.filter((v) => /^\d+$/.test(v)).map(Number);
+      const has12 = bathroomsList.includes("12+");
 
       const ORs = [];
       if (nums.length) {
@@ -142,7 +149,7 @@ r.get('/', auth(false), async (req, res) => {
       }
       if (has12) ORs.push(`l.bathrooms >= 12`);
 
-      clauses.push(`(${ORs.join(' OR ')})`);
+      clauses.push(`(${ORs.join(" OR ")})`);
     }
 
     // Price
@@ -168,22 +175,24 @@ r.get('/', auth(false), async (req, res) => {
     // Base filters
     clauses.push(`l.is_listed = true`);
     clauses.push(`l.villanet_enabled = true`);
-    clauses.push(`(l.images_json IS NOT NULL AND l.images_json != '[]'::jsonb)`);
+    clauses.push(
+      `(l.images_json IS NOT NULL AND l.images_json != '[]'::jsonb)`,
+    );
 
-    const whereSQL = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const whereSQL = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
     /***********************
      * ORDERING IDÉNTICO
      ***********************/
     let orderSQL = `ORDER BY l.updated_at DESC`;
 
-    if (sort === 'rank') {
+    if (sort === "rank") {
       orderSQL = `ORDER BY l.villanet_rank DESC NULLS LAST, l.updated_at DESC`;
-    } else if (sort === 'price_low') {
+    } else if (sort === "price_low") {
       orderSQL = `ORDER BY l.price_usd ASC NULLS LAST, l.updated_at DESC`;
-    } else if (sort === 'price_high') {
+    } else if (sort === "price_high") {
       orderSQL = `ORDER BY l.price_usd DESC NULLS LAST, l.updated_at DESC`;
-    } else if (sort === 'bedrooms') {
+    } else if (sort === "bedrooms") {
       orderSQL = `ORDER BY l.bedrooms DESC NULLS LAST, l.updated_at DESC`;
     }
 
@@ -244,13 +253,15 @@ r.get('/', auth(false), async (req, res) => {
 
       const [rows, count] = await Promise.all([
         pool.query(sql, [...params, lim, offset]),
-        pool.query(countSQL, params)
+        pool.query(countSQL, params),
       ]);
 
       const total = count.rows[0].total;
       const totalPages = Math.ceil(total / lim);
 
-      console.log(`✅ [Privado - No Availability] Page ${currentPage}/${totalPages}, showing ${rows.rows.length} items`);
+      console.log(
+        `✅ [Privado - No Availability] Page ${currentPage}/${totalPages}, showing ${rows.rows.length} items`,
+      );
 
       return res.json({
         results: normalizeResults(rows.rows),
@@ -260,7 +271,7 @@ r.get('/', auth(false), async (req, res) => {
         currentPage,
         totalPages,
         hasMore: currentPage < totalPages,
-        availabilityApplied: false
+        availabilityApplied: false,
       });
     }
 
@@ -275,7 +286,7 @@ r.get('/', auth(false), async (req, res) => {
     const ensureAvailabilitySession = async () => {
       if (cursorPos === 0 || !availabilitySession) {
         const sessionId = `private_av_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-        
+
         const session = {
           availableIds: [],
           cursor: 0,
@@ -287,25 +298,33 @@ r.get('/', auth(false), async (req, res) => {
           params: [...params],
           filters: { searchTerm, badgeSlugs, sort },
           createdAt: Date.now(),
-          lastAccessed: Date.now()
+          lastAccessed: Date.now(),
         };
-        
-        cache.set(`private_availability:${sessionId}`, session, AVAILABILITY_SESSION_TTL);
+
+        cache.set(
+          `private_availability:${sessionId}`,
+          session,
+          AVAILABILITY_SESSION_TTL,
+        );
         return { session, sessionId, isNew: true };
       }
-      
+
       const session = cache.get(`private_availability:${availabilitySession}`);
       if (!session) {
-        throw new Error('Availability session expired');
+        throw new Error("Availability session expired");
       }
-      
+
       if (session.checkIn !== checkIn || session.checkOut !== checkOut) {
-        throw new Error('Availability session filters changed');
+        throw new Error("Availability session filters changed");
       }
-      
+
       session.lastAccessed = Date.now();
-      cache.set(`private_availability:${availabilitySession}`, session, AVAILABILITY_SESSION_TTL);
-      
+      cache.set(
+        `private_availability:${availabilitySession}`,
+        session,
+        AVAILABILITY_SESSION_TTL,
+      );
+
       return { session, sessionId: availabilitySession, isNew: false };
     };
 
@@ -313,14 +332,16 @@ r.get('/', auth(false), async (req, res) => {
 
     // 🔥 ESTRATEGIA IDÉNTICA: Fast Scan optimizado
     if (isNew || session.availableIds.length < neededEnd) {
-      console.log(`🔍 [Privado FastScan] Session ${sessionId.slice(0, 12)}: needed ${neededEnd}, have ${session.availableIds.length}`);
-      
+      console.log(
+        `🔍 [Privado FastScan] Session ${sessionId.slice(0, 12)}: needed ${neededEnd}, have ${session.availableIds.length}`,
+      );
+
       // 1️⃣ Calcular cuánto necesitamos escanear
       const scanTarget = Math.min(
         neededEnd - session.availableIds.length + 10, // +10 de buffer
-        LAZY_SCAN_CHUNK
+        LAZY_SCAN_CHUNK,
       );
-      
+
       // 2️⃣ Traer candidatos SOLO para esta página
       const idsSQL = `
         SELECT l.listing_id AS id
@@ -329,71 +350,94 @@ r.get('/', auth(false), async (req, res) => {
         ${session.orderSQL}
         LIMIT ${scanTarget} OFFSET ${session.cursor};
       `;
-      
+
       const idsRes = await pool.query(idsSQL, session.params);
-      const candidateIds = idsRes.rows.map(r => r.id);
-      
+      const candidateIds = idsRes.rows.map((r) => r.id);
+
       if (candidateIds.length === 0) {
         session.exhausted = true;
       } else {
         session.cursor += candidateIds.length;
-        
+
         // 3️⃣ Verificar disponibilidad EN UN SOLO BATCH (sin loop infinito)
         const availableInChunk = [];
-        
+
         // Procesar en batches pequeños con concurrencia IDÉNTICA
-        for (let i = 0; i < candidateIds.length; i += AV_BATCH_SIZE * AV_CONCURRENCY) {
+        for (
+          let i = 0;
+          i < candidateIds.length;
+          i += AV_BATCH_SIZE * AV_CONCURRENCY
+        ) {
           const batchPromises = [];
-          
+
           for (let j = 0; j < AV_CONCURRENCY; j++) {
-            const startIdx = i + (j * AV_BATCH_SIZE);
+            const startIdx = i + j * AV_BATCH_SIZE;
             if (startIdx >= candidateIds.length) break;
-            
-            const batchIds = candidateIds.slice(startIdx, startIdx + AV_BATCH_SIZE);
+
+            const batchIds = candidateIds.slice(
+              startIdx,
+              startIdx + AV_BATCH_SIZE,
+            );
             if (batchIds.length > 0) {
               batchPromises.push(
                 getAvailabilityFor(batchIds, checkIn, checkOut)
-                  .then(batchResult => {
+                  .then((batchResult) => {
                     return batchResult
-                      .filter(a => a.available)
-                      .map(a => a.listing_id);
+                      .filter((a) => a.available)
+                      .map((a) => a.listing_id);
                   })
-                  .catch(err => {
-                    console.warn(`[Privado FastScan] Batch failed:`, err.message);
+                  .catch((err) => {
+                    console.warn(
+                      `[Privado FastScan] Batch failed:`,
+                      err.message,
+                    );
                     return [];
-                  })
+                  }),
               );
             }
           }
-          
+
           if (batchPromises.length > 0) {
             const batchResults = await Promise.all(batchPromises);
-            batchResults.forEach(result => {
+            batchResults.forEach((result) => {
               availableInChunk.push(...result);
             });
           }
         }
-        
+
         session.availableIds.push(...availableInChunk);
-        console.log(`📊 [Privado FastScan] Scanned ${candidateIds.length}, found ${availableInChunk.length} available (total: ${session.availableIds.length})`);
+        console.log(
+          `📊 [Privado FastScan] Scanned ${candidateIds.length}, found ${availableInChunk.length} available (total: ${session.availableIds.length})`,
+        );
       }
-      
+
       // Actualizar sesión
       session.lastAccessed = Date.now();
-      cache.set(`private_availability:${sessionId}`, session, AVAILABILITY_SESSION_TTL);
+      cache.set(
+        `private_availability:${sessionId}`,
+        session,
+        AVAILABILITY_SESSION_TTL,
+      );
     }
 
     // 4️⃣ DEVOLVER LO QUE TENGAMOS AHORA (aunque sea menos de lo pedido)
     const pageIds = session.availableIds.slice(offset, offset + lim);
-    const detailRows = await fetchDetails(pageIds, badgeSlugs, VILLANET_BADGE_FIELD_MAP);
+    const detailRows = await fetchDetails(
+      pageIds,
+      badgeSlugs,
+      VILLANET_BADGE_FIELD_MAP,
+    );
 
     const returned = detailRows.length;
     const nextCursor = offset + returned;
 
     // hasMore si NO está exhausto O si hay más IDs acumulados
-    const hasMore = !session.exhausted || nextCursor < session.availableIds.length;
+    const hasMore =
+      !session.exhausted || nextCursor < session.availableIds.length;
 
-    console.log(`✅ [Privado FastScan] Returning ${returned}/${lim} items, cursor ${cursorPos}→${nextCursor}, hasMore: ${hasMore}`);
+    console.log(
+      `✅ [Privado FastScan] Returning ${returned}/${lim} items, cursor ${cursorPos}→${nextCursor}, hasMore: ${hasMore}`,
+    );
 
     return res.json({
       results: normalizeResults(detailRows),
@@ -410,36 +454,36 @@ r.get('/', auth(false), async (req, res) => {
       currentPage: Math.floor(offset / lim) + 1,
       totalPages: Math.ceil(session.availableIds.length / lim) || 1,
       total: session.availableIds.length,
-      hasMore: hasMore
+      hasMore: hasMore,
     });
-
   } catch (err) {
-    console.error('❌ [Privado API] Listings error:', err);
-    
-    if (err.message === 'Availability session expired') {
-      return res.status(400).json({ 
-        message: 'Availability session expired. Please refresh your search.',
-        expired: true
+    console.error("❌ [Privado API] Listings error:", err);
+
+    if (err.message === "Availability session expired") {
+      return res.status(400).json({
+        message: "Availability session expired. Please refresh your search.",
+        expired: true,
       });
     }
-    
-    if (err.message === 'Availability session filters changed') {
-      return res.status(400).json({ 
-        message: 'Search filters changed. Starting new availability session.',
-        filtersChanged: true
+
+    if (err.message === "Availability session filters changed") {
+      return res.status(400).json({
+        message: "Search filters changed. Starting new availability session.",
+        filtersChanged: true,
       });
     }
-    
-    if (err.message?.includes('timeout') || err.message?.includes('TIMEOUT')) {
-      return res.status(504).json({ 
-        message: 'Availability check taking too long. Please try a smaller date range.',
-        suggestion: 'Try narrowing your search criteria'
+
+    if (err.message?.includes("timeout") || err.message?.includes("TIMEOUT")) {
+      return res.status(504).json({
+        message:
+          "Availability check taking too long. Please try a smaller date range.",
+        suggestion: "Try narrowing your search criteria",
       });
     }
-    
-    res.status(500).json({ 
-      message: 'Server error fetching listings',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+
+    res.status(500).json({
+      message: "Server error fetching listings",
+      error: process.env.NODE_ENV === "development" ? err.message : undefined,
     });
   }
 });
@@ -447,19 +491,23 @@ r.get('/', auth(false), async (req, res) => {
 /************************************************************
  * GET /listings/:id (PRIVADO – admin/TA/PMC) - Detalles completos
  ************************************************************/
-r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) => {
-  try {
-    const { id } = req.params;
-    const cacheKey = `private:listing:${id}`;
+r.get(
+  "/:id",
+  auth(true),
+  requireRole("admin", "ta", "pmc"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const cacheKey = `private:listing:${id}`;
 
-    const cached = cache.get(cacheKey);
-    if (cached) {
-      return res.json(cached);
-    }
+      const cached = cache.get(cacheKey);
+      if (cached) {
+        return res.json(cached);
+      }
 
-    // ✅ Incluir todos los campos como en la ruta pública
-    const { rows } = await pool.query(
-      `SELECT 
+      // ✅ Incluir todos los campos como en la ruta pública
+      const { rows } = await pool.query(
+        `SELECT 
         listing_id,
         name,
         bedrooms,
@@ -517,21 +565,24 @@ r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) =>
         updated_at
       FROM listings
       WHERE listing_id = $1`,
-      [id]
-    );
+        [id],
+      );
 
-    if (!rows.length) {
-      return res.status(404).json({ message: 'Listing not found' });
+      if (!rows.length) {
+        return res.status(404).json({ message: "Listing not found" });
+      }
+
+      const result = rows[0];
+      cache.set(cacheKey, result, 600000);
+      res.json(result);
+    } catch (err) {
+      console.error("[Privado API] Listing detail error:", err);
+      res
+        .status(500)
+        .json({ message: err.message || "Error fetching listing detail" });
     }
-
-    const result = rows[0];
-    cache.set(cacheKey, result, 600000);
-    res.json(result);
-  } catch (err) {
-    console.error('[Privado API] Listing detail error:', err);
-    res.status(500).json({ message: err.message || 'Error fetching listing detail' });
-  }
-});
+  },
+);
 
 /************************************************************
  * Helpers OPTIMIZADOS IDÉNTICOS a ruta pública
@@ -540,9 +591,13 @@ r.get('/:id', auth(true), requireRole('admin', 'ta', 'pmc'), async (req, res) =>
 /**
  * Fetch details preservando el orden original
  */
-async function fetchDetails(ids, badgeSlugs = [], VILLANET_BADGE_FIELD_MAP = {}) {
+async function fetchDetails(
+  ids,
+  badgeSlugs = [],
+  VILLANET_BADGE_FIELD_MAP = {},
+) {
   if (!ids.length) return [];
-  
+
   // Usar WITH ORDINALITY para preservar el orden de los IDs
   const sql = `
     WITH ordered_ids AS (
@@ -589,10 +644,10 @@ async function fetchDetails(ids, badgeSlugs = [], VILLANET_BADGE_FIELD_MAP = {})
       oi.ordinality
     FROM ordered_ids oi
     JOIN listings l ON l.listing_id = oi.id
-    ${badgeSlugs.length > 0 ? buildBadgeFilters(badgeSlugs, VILLANET_BADGE_FIELD_MAP) : ''}
+    ${badgeSlugs.length > 0 ? buildBadgeFilters(badgeSlugs, VILLANET_BADGE_FIELD_MAP) : ""}
     ORDER BY oi.ordinality;
   `;
-  
+
   const { rows } = await pool.query(sql, [ids]);
   return rows;
 }
@@ -601,45 +656,79 @@ async function fetchDetails(ids, badgeSlugs = [], VILLANET_BADGE_FIELD_MAP = {})
  * Helper para construir filtros de badges
  */
 function buildBadgeFilters(badgeSlugs, VILLANET_BADGE_FIELD_MAP) {
-  const validSlugs = badgeSlugs.filter(slug => VILLANET_BADGE_FIELD_MAP[slug]);
-  if (validSlugs.length === 0) return '';
-  
-  const conditions = validSlugs.map(slug => {
+  const validSlugs = badgeSlugs.filter(
+    (slug) => VILLANET_BADGE_FIELD_MAP[slug],
+  );
+  if (validSlugs.length === 0) return "";
+
+  const conditions = validSlugs.map((slug) => {
     const fieldName = VILLANET_BADGE_FIELD_MAP[slug];
     return `l.${fieldName} = true`;
   });
-  
-  return `WHERE ${conditions.join(' AND ')}`;
+
+  return `WHERE ${conditions.join(" AND ")}`;
 }
 
 /**
  * Normalizar resultados (IDÉNTICO a ruta pública)
  */
 function normalizeResults(rows) {
-  const PLACEHOLDER = 'https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200';
-  
-  return rows.map(r => {
+  const PLACEHOLDER =
+    "https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200";
+
+  return rows.map((r) => {
     const normalizeBoolean = (value) => {
       if (value === null || value === undefined) return false;
-      if (typeof value === 'boolean') return value;
-      if (typeof value === 'string') {
-        return value.toLowerCase() === 'true' || value.toLowerCase() === 'yes' || value === '1';
+      if (typeof value === "boolean") return value;
+      if (typeof value === "string") {
+        return (
+          value.toLowerCase() === "true" ||
+          value.toLowerCase() === "yes" ||
+          value === "1"
+        );
       }
       return Boolean(value);
     };
-    
+
     // Remover el campo ordinality si existe
     const { ordinality, ...rest } = r;
-    
+
     return {
       ...rest,
+      // 1. ELIMINAR "Unknown" de campos de texto
+      location:
+        r.location_text && r.location_text !== "Unknown" ? r.location_text : "",
+      propertyManager:
+        r.villanet_property_manager_name &&
+        r.villanet_property_manager_name !== "Unknown"
+          ? r.villanet_property_manager_name
+          : "",
+
+      // 2. NORMALIZAR DESTINOS (Evitar "Unknown")
+      villaNetCity:
+        r.villanet_city && r.villanet_city !== "Unknown" ? r.villanet_city : "",
+      villaNetDestinationTag:
+        r.villanet_destination_tag && r.villanet_destination_tag !== "Unknown"
+          ? r.villanet_destination_tag
+          : "",
+
+      // 3. LIMPIEZA DE IMAGES_JSON (A veces se guardan tags aquí por error)
+      images_json: Array.isArray(r.images_json)
+        ? r.images_json.filter(
+            (img) => img !== "Unknown" && img !== "Villas not verified",
+          )
+        : [],
+
+      // 4. VERIFICACIÓN (Solo booleano, sin textos de advertencia)
+      trustAccount: !!r.trust_account,
+
       rank: r.rank !== null ? Number(r.rank) : null,
       images_json: Array.isArray(r.images_json) ? r.images_json : [],
       heroImage:
         (Array.isArray(r.images_json) && r.images_json[0]) ||
         r.heroImage ||
         PLACEHOLDER,
-      
+
       villanetChefIncluded: normalizeBoolean(r.villanetChefIncluded),
       villanetHeatedPool: normalizeBoolean(r.villanetHeatedPool),
       villanetOceanView: normalizeBoolean(r.villanetOceanView),
@@ -650,7 +739,9 @@ function normalizeResults(rows) {
       villanetPrivateGym: normalizeBoolean(r.villanetPrivateGym),
       villanetPrivateCinema: normalizeBoolean(r.villanetPrivateCinema),
       villanetCookIncluded: normalizeBoolean(r.villanetCookIncluded),
-      villanetWaiterButlerIncluded: normalizeBoolean(r.villanetWaiterButlerIncluded),
+      villanetWaiterButlerIncluded: normalizeBoolean(
+        r.villanetWaiterButlerIncluded,
+      ),
       villanetOceanFront: normalizeBoolean(r.villanetOceanFront),
       villanetWalkToBeach: normalizeBoolean(r.villanetWalkToBeach),
       villanetAccessible: normalizeBoolean(r.villanetAccessible),

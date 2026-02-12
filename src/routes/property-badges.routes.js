@@ -24,10 +24,21 @@ r.get('/:id/badges', auth(true), async (req, res) => {
     ORDER BY c.sort_order, b.name
   `, [id]);
 
-  const assignments = rows.map(r => ({
+  rows
+  .filter(r => 
+    r.name !== 'Unknown' && 
+    r.name !== 'Villas not verified' && 
+    r.slug !== 'unknown'
+  ) // 🔥 FILTRO CLAVE
+  .map(r => ({
     badge: {
-      id: r.id, slug: r.slug, name: r.name, category_slug: r.category_slug,
-      description: r.description, icon: r.icon, is_dynamic: r.is_dynamic
+      id: r.id, 
+      slug: r.slug, 
+      name: r.name, 
+      category_slug: r.category_slug,
+      description: r.description, 
+      icon: r.icon, 
+      is_dynamic: r.is_dynamic
     },
     value: r.value || null
   }));
