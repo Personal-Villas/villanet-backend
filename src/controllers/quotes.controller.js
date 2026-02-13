@@ -171,11 +171,7 @@ function toYmd(d) {
   const dt = new Date(d);
   if (Number.isNaN(dt.getTime())) return null;
 
-  // IMPORTANTE: usar UTC para evitar que te cambie el día por timezone
-  const y = dt.getUTCFullYear();
-  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(dt.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  return dt.toISOString().split("T")[0];
 }
 
 /**
@@ -493,15 +489,25 @@ export async function sendQuoteEmail(req, res) {
     // 1) Obtener el quote
     const quoteResult = await client.query(
       `SELECT * FROM quotes WHERE id = $1 AND status = 'draft' FOR UPDATE`,
-      [id]
+      [id],
     );
 
     if (quoteResult.rows.length === 0) {
       await client.query("ROLLBACK");
-      return res.status(404).json({ error: "Quote no encontrado o ya enviado" });
+      return res
+        .status(404)
+        .json({ error: "Quote no encontrado o ya enviado" });
     }
 
     const quote = quoteResult.rows[0];
+
+    // 🔥 DEBUG: Verificamos qué viene exactamente de la BD
+    console.log("🔍 DATOS CRUDOS DB:", {
+      id: quote.id,
+      check_in_db: quote.check_in,
+      check_out_db: quote.check_out,
+      client_email: quote.client_email,
+    });
 
     // 2) Obtener items (villas)
     const itemsResult = await client.query(
@@ -509,11 +515,10 @@ export async function sendQuoteEmail(req, res) {
        FROM quote_items qi
        LEFT JOIN listings l ON qi.listing_id = l.listing_id
        WHERE qi.quote_id = $1`,
-      [id]
+      [id],
     );
 
-    // ✅ CORRECCIÓN 1: Definir 'items' explícitamente para evitar ReferenceError
-    const items = itemsResult.rows; 
+    const items = itemsResult.rows;
 
     if (items.length === 0) {
       await client.query("ROLLBACK");
@@ -523,14 +528,16 @@ export async function sendQuoteEmail(req, res) {
     // --- PREPARACIÓN DE DATOS ---
     const checkInYmd = toYmd(quote.check_in);
     const checkOutYmd = toYmd(quote.check_out);
-    
-    // ✅ CORRECCIÓN 2: Detectar si hay fechas válidas
+
+    // Detectar si hay fechas válidas
     const hasDates = checkInYmd && checkOutYmd;
-    
+
     // Si hay fechas, calculamos noches. Si no, ponemos 1 para efectos visuales de precio base.
     const nights = hasDates ? countStayNights(checkInYmd, checkOutYmd) : 1;
 
-    console.log(`📅 Datos: CheckIn=${checkInYmd}, CheckOut=${checkOutYmd}, Nights=${nights}, HasDates=${hasDates}`);
+    console.log(
+      `📅 Datos: CheckIn=${checkInYmd}, CheckOut=${checkOutYmd}, Nights=${nights}, HasDates=${hasDates}`,
+    );
 
     // 3) Procesamiento Paralelo
     const itemsWithFullData = await Promise.all(
@@ -544,7 +551,7 @@ export async function sendQuoteEmail(req, res) {
             checkInYmd,
             checkOutYmd,
             quote.guests,
-            item.commission_rate
+            item.commission_rate,
           );
         }
 
@@ -552,8 +559,8 @@ export async function sendQuoteEmail(req, res) {
         const guestyUrl = buildGuestyUrl({
           domainOrUrl: item.guesty_booking_domain || "https://book.guesty.com",
           listingId: item.listing_id,
-          checkInYmd,   // Puede ser null
-          checkOutYmd,  // Puede ser null
+          checkInYmd,
+          checkOutYmd,
           guests: quote.guests,
         });
 
@@ -562,56 +569,65 @@ export async function sendQuoteEmail(req, res) {
           base: Number(item.price_usd) * nights,
           taxes: 0,
           cleaning: 0,
-          commission: 0,
+          commission_rate: 0,
           totalGross: Number(item.price_usd) * nights,
           currency: "USD",
-          isEstimate: true // Marca para el frontend/email
+          isEstimate: true, // Marca para el frontend/email
         };
 
         return {
           ...item,
           guestyUrl,
-          breakdown: finalBreakdown
+          breakdown: finalBreakdown,
         };
-      })
+      }),
     );
 
     // 4) Generar HTML
     // Pasamos 'nights' explícitamente para que el template no falle
-    const emailHtml = await generateQuoteEmailHtml(quote, itemsWithFullData, nights);
+    const emailHtml = await generateQuoteEmailHtml(
+      quote,
+      itemsWithFullData,
+      nights,
+      checkInYmd,
+      checkOutYmd,
+    );
 
     // 5) Enviar email
     console.log(`📮 Enviando email a: ${quote.client_email}`);
     await sendEmail({
       to: quote.client_email,
-      subject: `Villa Quote for - ${quote.client_name || "Guest"}`,
+      subject: `Your Curated Villa Options from - ${quote.client_name || "Guest"}`,
       html: emailHtml,
     });
 
     // 6) Actualizar DB
     await client.query(
       `UPDATE quotes SET status = 'sent', updated_at = NOW() WHERE id = $1`,
-      [id]
+      [id],
     );
 
     // 7) Notificar Discord (Calculando el total con los datos procesados)
-    const totalQuoteAmount = itemsWithFullData.reduce((sum, i) => sum + (i.breakdown?.totalGross || 0), 0);
-    
+    const totalQuoteAmount = itemsWithFullData.reduce(
+      (sum, i) => sum + (i.breakdown?.totalGross || 0),
+      0,
+    );
+
     notifySafely(() =>
       sendQuoteNotification({
         quoteId: id,
         clientEmail: quote.client_email,
         clientName: quote.client_name,
-        villas: itemsWithFullData.map(i => ({ 
-          name: i.listing_name, 
-          price: i.breakdown.totalGross 
+        villas: itemsWithFullData.map((i) => ({
+          name: i.listing_name,
+          price: i.breakdown.totalGross,
         })),
         checkIn: checkInYmd,
         checkOut: checkOutYmd,
         guests: quote.guests,
         totalPrice: totalQuoteAmount,
         downloadUrl: itemsWithFullData[0]?.guestyUrl,
-      })
+      }),
     );
 
     await client.query("COMMIT");
@@ -620,16 +636,16 @@ export async function sendQuoteEmail(req, res) {
     return res.json({
       success: true,
       message: `Email enviado a ${quote.client_email}`,
-      quoteId: id
+      quoteId: id,
     });
-
   } catch (error) {
     await client.query("ROLLBACK");
     console.error("❌ Error enviando email de quote:", error);
     // IMPORTANTE: Devolver json para que el frontend no se cuelgue
     return res.status(500).json({
       error: "Error interno al enviar el email",
-      details: process.env.NODE_ENV === "development" ? error.message : undefined,
+      details:
+        process.env.NODE_ENV === "development" ? error.message : undefined,
     });
   } finally {
     client.release();
@@ -639,14 +655,22 @@ export async function sendQuoteEmail(req, res) {
 /**
  * Genera el HTML del email
  */
-export async function generateQuoteEmailHtml(quote, items, nights) {
+export async function generateQuoteEmailHtml(
+  quote,
+  items,
+  nights,
+  checkInYmd,
+  checkOutYmd,
+) {
   const formatDate = (dateStr) => {
-    if (!dateStr) return "Flexible";
-    return new Date(dateStr).toLocaleDateString("en-US", {
+    if (!dateStr) return "Flexible Dates";
+    const d = new Date(dateStr + "T12:00:00");
+    return d.toLocaleDateString("en-US", {
       weekday: "long",
       year: "numeric",
       month: "long",
       day: "numeric",
+      timeZone: "UTC",
     });
   };
 
@@ -655,11 +679,18 @@ export async function generateQuoteEmailHtml(quote, items, nights) {
     return new Intl.NumberFormat("en-US", {
       style: "currency",
       currency: "USD",
-    }).format(amount);
+      minimumFractionDigits: 0,
+    }).format(amount || 0);
   };
 
   const safeNights = nights || 1;
 
+  const mapPin = `<img src="https://cdn-icons-png.flaticon.com/128/484/484167.png" width="14" height="14" style="vertical-align:middle; margin-right:4px; opacity:0.6;" alt="Location">`;
+  const guestIcon = `<img src="https://cdn-icons-png.flaticon.com/128/1077/1077063.png" width="14" height="14" style="vertical-align:middle; margin-right:4px; opacity:0.6;" alt="Guests">`;
+  const calendarIcon = `<img src="https://cdn-icons-png.flaticon.com/128/2838/2838779.png" width="14" height="14" style="vertical-align:middle; margin-right:4px; opacity:0.6;" alt="Calendar">`;
+  const nightsIcon = `<img src="https://cdn-icons-png.flaticon.com/128/606/606807.png" width="14" height="14" style="vertical-align:middle; margin-right:4px; opacity:0.6;" alt="Nights">`;
+  
+  
   return `
   <!DOCTYPE html>
   <html>
@@ -669,7 +700,7 @@ export async function generateQuoteEmailHtml(quote, items, nights) {
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       body { 
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        font-family: Inter;
         line-height: 1.6; 
         color: #09090b;
         background: #f9fafb;
@@ -748,90 +779,40 @@ export async function generateQuoteEmailHtml(quote, items, nights) {
         margin-bottom: 16px;
         line-height: 1.2;
       }
-      .property-details {
-        margin: 16px 0;
+      .breakdown-container{
+        background:#f9fafb;
+        padding:15px;
+         border-radius:8px;
       }
-      .property-detail {
-        font-size: 14px;
-        color: #52525b;
-        margin: 8px 0;
-        display: flex;
-        align-items: center;
-        gap: 8px;
+      .breakdown-row { 
+        margin-bottom: 12px; 
+        font-size: 14px; 
       }
-      .property-detail strong {
-        color: #09090b;
-        font-weight: 500;
+      .breakdown-label { 
+        display: block; 
+        color: #666; 
+        margin-bottom: 2px;
       }
-      .price-tag {
-        background: #f4f4f5;
-        padding: 16px;
-        border-radius: 6px;
-        padding: 16px;
-        margin: 20px 0;
-        text-align: center;
+      .breakdown-value { 
+        display: block; 
+        font-weight: bold; 
+        font-size: 15px;
       }
-      .price-tag .label {
-        font-size: 12px;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        color: #71717a;
-        margin-bottom: 4px;
-      }
-      .price-tag .amount {
-        font-size: 24px;
-        font-weight: 600;
-        color: #09090b;
-        align-items: center;
-      }
-      .nightly-subtext {
-        font-size: 11px;
-        font-weight: 400;
-        color: #71717a;
-      }
-
+      
       .btn { 
         display: inline-block;
         width: 100%;
-        background: #09090b;
-        color: #ffffff;
+        background: #000;
+        color: #ffffff !important;
         padding: 14px 24px;
         text-decoration: none;
         border-radius: 6px;
-        font-weight: 500;
-        font-size: 15px;
+        font-weight: bold;
+        font-size: 13px;
         text-align: center;
         transition: background 0.2s;
       }
-      .btn-note {
-        font-size: 12px;
-        color: #71717a;
-        font-style: italic;
-        margin-top: 12px;
-        text-align: center;
-      }
-      .divider {
-        height: 1px;
-        background: #e5e5e5;
-        margin: 32px 0;
-      }
-      .tip-box {
-        background: #fafafa;
-        border: 1px solid #e5e5e5;
-        border-radius: 8px;
-        padding: 20px;
-        text-align: center;
-        margin: 32px 0;
-      }
-      .tip-box p {
-        font-size: 14px;
-        color: #52525b;
-        line-height: 1.5;
-      }
-      .tip-box strong {
-        color: #09090b;
-        font-weight: 600;
-      }
+      
       .footer { 
         background: #fafafa;
         padding: 32px;
@@ -844,13 +825,18 @@ export async function generateQuoteEmailHtml(quote, items, nights) {
         margin: 8px 0;
         line-height: 1.5;
       }
-      .footer-meta {
+
+      .villanet-badge {
+        display: inline-block;
+        color: #111111;           
+        padding: 2px 8px;
+        border-radius: 12px;
         font-size: 11px;
-        color: #a1a1aa;
-        margin-top: 16px;
-        padding-top: 16px;
-        border-top: 1px solid #e5e5e5;
-      }
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }      
+
       @media only screen and (max-width: 600px) {
         .header { padding: 32px 20px 24px; }
         .content { padding: 20px; }
@@ -862,19 +848,21 @@ export async function generateQuoteEmailHtml(quote, items, nights) {
   <body>
     <div class="container">
       <div class="header">
-        <div class="header-label">VILLA SELECTION</div>
-        <h1>Luxury Villas for Your Trip</h1>
-        <p>Hello ${quote.client_name || "Valued Guest"},</p>
-        <p>We've selected these exceptional properties based on your preferences.</p>
+        <div>
+          <span class="villanet-badge">villanet</span>
+        </div>
+        <h1>Your Curated Villa Options</h1>
+        <p>Hello ${quote.client_name || "Valued Guest"}!</p>
+        <p>Based on your preferences, here is a selection of properties for your review</p>
 
       </div>
       
       <div class="content">
         <div class="date-info">
-          <p><strong>📅 Check-in:</strong> ${formatDate(quote.checkIn)}</p>
-          <p><strong>📅 Check-out:</strong> ${formatDate(quote.checkOut)}</p>
-          <p><strong>🌙 Nights:</strong> ${safeNights}</p>
-          ${quote.guests ? `<p><strong>👥 Guests:</strong> ${quote.guests}</p>` : ""}
+          <p><strong>${calendarIcon} Check-in:</strong> ${formatDate(checkInYmd)}</p>
+          <p><strong>${calendarIcon} Check-out:</strong> ${formatDate(checkOutYmd)}</p>
+          <p><strong>${nightsIcon} Nights:</strong> ${safeNights}</p>
+          ${quote.guests ? `<p><strong>${guestIcon} Guests:</strong> ${quote.guests || 1}</p>` : ""}
         </div>
   
         ${items
@@ -887,20 +875,24 @@ export async function generateQuoteEmailHtml(quote, items, nights) {
             ${item.image_url ? `<img src="${item.image_url}" class="property-image">` : ""}
             <div class="property-content">
               <h3>${item.listing_name || "Luxury Villa"}</h3>
-              <p style="font-size:14px; color:#71717a; margin-bottom:12px;">📍 ${item.listing_location || "Contact for details"}</p>
+              <p style="font-size:14px; color:#71717a; margin-bottom:12px;">${mapPin} ${item.listing_location || "Contact for details"}</p>
   
-              <div class="breakdown-container" style="background:#f9fafb; padding:15px; border-radius:8px;">
-                <div class="breakdown-row" style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:5px;">
-                  <span>Accommodation (${safeNights} nights)</span>
-                  <span>${formatCurrency(b.base, b.currency)}</span>
+              <div class="breakdown-container">
+                <div class="breakdown-row">
+                  <div class="breakdown-label">
+                    Base Rate (${safeNights} nights)
+                  </div>
+                  <span class="breakdown-value">${formatCurrency(b.base, b.currency)}</span>
                 </div>
                 
                 ${
                   b.cleaning > 0
                     ? `
-                <div class="breakdown-row" style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:5px;">
-                  <span>Cleaning Fee</span>
-                  <span>${formatCurrency(b.cleaning, b.currency)}</span>
+                <div class="breakdown-row">
+                  <div class="breakdown-label">
+                    Cleaning Fee
+                  </div>
+                  <span class="breakdown-value">${formatCurrency(b.cleaning, b.currency)}</span>
                 </div>`
                     : ""
                 }
@@ -908,31 +900,32 @@ export async function generateQuoteEmailHtml(quote, items, nights) {
                 ${
                   b.taxes > 0
                     ? `
-                <div class="breakdown-row" style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:5px;">
-                  <span>Taxes & VAT</span>
-                  <span>${formatCurrency(b.taxes, b.currency)}</span>
+                <div class="breakdown-row">
+                  <div class="breakdown-label">
+                    Taxes & Fees
+                  </div>
+                  <span class="breakdown-value">${formatCurrency(b.taxes, b.currency)}</span>
                 </div>`
                     : ""
                 }
 
                 ${
-                  b.commission > 0
+                  b.commission_rate > 0
                     ? `
                 <div class="breakdown-row" style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:5px; color:#16a34a;">
-                  <span>Service Fee</span>
-                  <span>${formatCurrency(b.commission, b.currency)}</span>
+                  <div class="breakdown-label">
+                    Service Fee
+                  </div>
+                  <span class="breakdown-value">${formatCurrency(b.commission_rate, b.currency)}</span>
                 </div>`
                     : ""
                 }
 
-               <div class="breakdown-row total">
-                  <div>
+               <div class="breakdown-row">
+                  <div class="breakdown-label">
                      Total Quote
-                     <div style="font-size:11px; font-weight:normal; color:#71717a;">
-                       avg ${formatCurrency(b.totalGross / safeNights, b.currency)} / night
-                     </div>
                   </div>
-                  <span>${formatCurrency(b.totalGross, b.currency)}</span>
+                  <span class="breakdown-value">${formatCurrency(b.totalGross, b.currency)}</span>
                 </div>
               </div>
   
@@ -945,12 +938,15 @@ export async function generateQuoteEmailHtml(quote, items, nights) {
           })
           .join("")}
         
-        <div class="footer" style="text-align:center; margin-top:40px; color:#999; font-size:12px;">
-          <p>Quote ID: ${quote.id}</p>
+        <div class="footer">
+          <p>These properties are professionally managed and vetted for service standards and accuracy.</p>
+          <p>Questions? Contact your travel advisor directly.</p>
+        </div>
+        <div style="display:none; white-space:nowrap; font:15px courier; line-height:0;">
+          ${crypto.randomBytes(8).toString('hex')}
         </div>
       </div>
-    </div>
-  </body>
+    </body>
   </html>
   `;
 }
@@ -1318,7 +1314,7 @@ async function getGuestyBreakdown(
   try {
     // Reutilizamos el endpoint de tu calculadora
     const payload = {
-      listingId,
+      listingId: listingId,
       checkInDateLocalized: checkIn,
       checkOutDateLocalized: checkOut,
       guestsCount: Number(guests) || 1,
@@ -1350,7 +1346,11 @@ async function getGuestyBreakdown(
       currency: parsed.currency || "USD",
     };
   } catch (error) {
-    console.error(`⚠️ Breakdown falló para ${listingId}:`, error.message);
+    // LOG CRÍTICO: Aquí veremos por qué Guesty dice 400
+    console.error(
+      `⚠️ Breakdown falló para ${listingId}:`,
+      e.response?.data?.message || e.response?.data || e.message,
+    );
     return null;
   }
 }

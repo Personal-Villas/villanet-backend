@@ -1,5 +1,5 @@
 const DISCORD_WEBHOOK_ACCESS = process.env.DISCORD_WEBHOOK_ACCESS;
-//const DISCORD_WEBHOOK_QUOTES = process.env.DISCORD_WEBHOOK_QUOTES;
+const DISCORD_WEBHOOK_QUOTES = process.env.DISCORD_WEBHOOK_QUOTES;
 const TIMEOUT_MS = 5000;
 
 // ✅ NUEVO: Cargar whitelist desde .env
