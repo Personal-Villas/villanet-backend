@@ -476,7 +476,7 @@ r.get('/:id', async (req, res) => {
         lat,
         lng,
 
-        COALESCE(villanet_destination_tag, villanet_city, city) AS location,
+        COALESCE(villanet_destination_tag, villanet_city, city,'') AS location,
 
         description,
         amenities_json AS amenities,
@@ -563,7 +563,7 @@ async function fetchDetails(ids, badgeSlugs = [], VILLANET_BADGE_FIELD_MAP = {})
       l.price_usd AS "priceUSD",
 
       l.villanet_rank AS rank,
-      COALESCE(l.villanet_destination_tag, l.villanet_city, l.city) AS location,
+      COALESCE(l.villanet_destination_tag, l.villanet_city, l.city,'') AS location,
 
       l.villanet_destination_tag AS "villaNetDestinationTag",
       l.villanet_city AS "villaNetCity",

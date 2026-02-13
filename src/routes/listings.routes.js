@@ -210,7 +210,7 @@ r.get("/", auth(false), async (req, res) => {
           l.price_usd AS "priceUSD",
 
           l.villanet_rank AS rank,
-          COALESCE(l.villanet_destination_tag, l.villanet_city, l.city) AS location,
+          COALESCE(l.villanet_destination_tag, l.villanet_city, l.city,'') AS location,
 
           l.villanet_destination_tag AS "villaNetDestinationTag",
           l.villanet_city AS "villaNetCity",
@@ -517,7 +517,7 @@ r.get(
         lat,
         lng,
 
-        COALESCE(villanet_destination_tag, villanet_city, city) AS location,
+        COALESCE(villanet_destination_tag, villanet_city, city,'') AS location,
 
         description,
         amenities_json AS amenities,
@@ -612,7 +612,7 @@ async function fetchDetails(
       l.price_usd AS "priceUSD",
 
       l.villanet_rank AS rank,
-      COALESCE(l.villanet_destination_tag, l.villanet_city, l.city) AS location,
+      COALESCE(l.villanet_destination_tag, l.villanet_city, l.city,'') AS location,
 
       l.villanet_destination_tag AS "villaNetDestinationTag",
       l.villanet_city AS "villaNetCity",
@@ -696,8 +696,7 @@ function normalizeResults(rows) {
     return {
       ...rest,
       // 1. ELIMINAR "Unknown" de campos de texto
-      location:
-        r.location_text && r.location_text !== "Unknown" ? r.location_text : "",
+      location: r.location && r.location !== "Unknown" ? r.location : "",
       propertyManager:
         r.villanet_property_manager_name &&
         r.villanet_property_manager_name !== "Unknown"
@@ -723,7 +722,7 @@ function normalizeResults(rows) {
       trustAccount: !!r.trust_account,
 
       rank: r.rank !== null ? Number(r.rank) : null,
-      images_json: Array.isArray(r.images_json) ? r.images_json : [],
+      
       heroImage:
         (Array.isArray(r.images_json) && r.images_json[0]) ||
         r.heroImage ||
