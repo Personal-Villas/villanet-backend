@@ -475,191 +475,161 @@ export async function getQuoteDetails(req, res) {
     res.status(500).json({ error: "Error interno" });
   }
 }
-
 /**
  * POST /quotes/:id/send
- * Envía el email con los links de Guesty
- * ✅ VERSIÓN CORREGIDA con builder nuevo y logs de debug
+ * Envía el email. Maneja fechas nulas (Flexibles) y define 'items' correctamente.
  */
 export async function sendQuoteEmail(req, res) {
   const client = await pool.connect();
 
   try {
     const { id } = req.params;
-    const userId = req.user.id;
+    const userId = req.user.id; // Puede ser undefined si no hay auth middleware estricto, no es crítico para el envío
 
-    console.log(`📧 SEND QUOTE EMAIL - Quote ID: ${id}, User ID: ${userId}`);
+    console.log(`📧 SEND QUOTE EMAIL - Quote ID: ${id}`);
 
     await client.query("BEGIN");
 
-    // 1) Verificar que el quote existe y está en draft (con FOR UPDATE)
+    // 1) Obtener el quote
     const quoteResult = await client.query(
-      `SELECT * FROM quotes 
-       WHERE id = $1 AND status = 'draft'
-       FOR UPDATE`,
-      [id],
+      `SELECT * FROM quotes WHERE id = $1 AND status = 'draft' FOR UPDATE`,
+      [id]
     );
 
     if (quoteResult.rows.length === 0) {
       await client.query("ROLLBACK");
-      console.error(`❌ Quote ${id} no encontrado o ya enviado`);
-      return res.status(404).json({
-        error: "Quote no encontrado o ya fue enviado",
-      });
+      return res.status(404).json({ error: "Quote no encontrado o ya enviado" });
     }
 
     const quote = quoteResult.rows[0];
-    console.log(`✅ Quote encontrado:`, {
-      id: quote.id,
-      client_email: quote.client_email,
-      check_in: quote.check_in,
-      check_out: quote.check_out,
-      guests: quote.guests,
-    });
 
-    // 2) Obtener items para el email
+    // 2) Obtener items (villas)
     const itemsResult = await client.query(
-      `SELECT * FROM quote_items WHERE quote_id = $1`,
-      [id],
+      `SELECT qi.*, COALESCE(l.villanet_commission_rate, 0) as commission_rate 
+       FROM quote_items qi
+       LEFT JOIN listings l ON qi.listing_id = l.listing_id
+       WHERE qi.quote_id = $1`,
+      [id]
     );
 
-    const items = itemsResult.rows;
+    // ✅ CORRECCIÓN 1: Definir 'items' explícitamente para evitar ReferenceError
+    const items = itemsResult.rows; 
+
     if (items.length === 0) {
       await client.query("ROLLBACK");
-      console.error(`❌ Quote ${id} sin items`);
-      return res.status(400).json({
-        error: "El quote no tiene propiedades",
-      });
+      return res.status(400).json({ error: "El quote no tiene propiedades" });
     }
 
-    // 🔥 LOG CRÍTICO: Verificar dominios que vienen de la DB
-    console.log(
-      "🔥 DOMAINS IN DB:",
-      items.map((i) => ({
-        listing_id: i.listing_id,
-        listing_name: i.listing_name,
-        guesty_booking_domain: i.guesty_booking_domain,
-      })),
-    );
-
-    // 3) Convertir fechas a formato YYYY-MM-DD para Guesty
+    // --- PREPARACIÓN DE DATOS ---
     const checkInYmd = toYmd(quote.check_in);
     const checkOutYmd = toYmd(quote.check_out);
+    
+    // ✅ CORRECCIÓN 2: Detectar si hay fechas válidas
+    const hasDates = checkInYmd && checkOutYmd;
+    
+    // Si hay fechas, calculamos noches. Si no, ponemos 1 para efectos visuales de precio base.
+    const nights = hasDates ? countStayNights(checkInYmd, checkOutYmd) : 1;
 
-    console.log(
-      `📅 Fechas convertidas: checkIn=${checkInYmd}, checkOut=${checkOutYmd}`,
+    console.log(`📅 Datos: CheckIn=${checkInYmd}, CheckOut=${checkOutYmd}, Nights=${nights}, HasDates=${hasDates}`);
+
+    // 3) Procesamiento Paralelo
+    const itemsWithFullData = await Promise.all(
+      items.map(async (item) => {
+        let breakdown = null;
+
+        // Solo llamamos a Guesty si tenemos fechas. Si es flexible, saltamos este paso.
+        if (hasDates) {
+          breakdown = await getGuestyBreakdown(
+            item.listing_id,
+            checkInYmd,
+            checkOutYmd,
+            quote.guests,
+            item.commission_rate
+          );
+        }
+
+        // Generar URL (Guesty maneja URLs sin fechas, solo lleva al listing)
+        const guestyUrl = buildGuestyUrl({
+          domainOrUrl: item.guesty_booking_domain || "https://book.guesty.com",
+          listingId: item.listing_id,
+          checkInYmd,   // Puede ser null
+          checkOutYmd,  // Puede ser null
+          guests: quote.guests,
+        });
+
+        // Fallback: Si no hay breakdown (por fechas nulas o error api), calculamos el base localmente
+        const finalBreakdown = breakdown || {
+          base: Number(item.price_usd) * nights,
+          taxes: 0,
+          cleaning: 0,
+          commission: 0,
+          totalGross: Number(item.price_usd) * nights,
+          currency: "USD",
+          isEstimate: true // Marca para el frontend/email
+        };
+
+        return {
+          ...item,
+          guestyUrl,
+          breakdown: finalBreakdown
+        };
+      })
     );
 
-    // 4) Generar URLs de Guesty usando el builder corregido
-    const itemsWithUrls = items.map((item, idx) => {
-      console.log(`\n🔗 Building URL for item ${idx}:`);
-      console.log(`  listing_id: ${item.listing_id}`);
-      console.log(`  domain from DB: ${item.guesty_booking_domain}`);
-      console.log(`  guests: ${quote.guests} (will default to 1 if invalid)`);
+    // 4) Generar HTML
+    // Pasamos 'nights' explícitamente para que el template no falle
+    const emailHtml = await generateQuoteEmailHtml(quote, itemsWithFullData, nights);
 
-      const guestyUrl = buildGuestyUrl({
-        domainOrUrl: item.guesty_booking_domain || "https://book.guesty.com",
-        listingId: item.listing_id,
-        checkInYmd,
-        checkOutYmd,
-        guests: quote.guests,
-      });
-
-      console.log(`  ✅ Generated URL: ${guestyUrl}`);
-
-      return { ...item, guestyUrl };
-    });
-
-    // 🔍 LOG: URLs finales generadas
-    console.log("\n📋 FINAL URLs GENERATED:");
-    itemsWithUrls.forEach((item, idx) => {
-      console.log(`  [${idx}] ${item.listing_name}`);
-      console.log(`       ${item.guestyUrl}`);
-    });
-
-    // 5) Generar HTML del email
-    const emailHtml = generateQuoteEmailHtml(quote, itemsWithUrls);
-
-    // 6) Enviar email
+    // 5) Enviar email
     console.log(`📮 Enviando email a: ${quote.client_email}`);
     await sendEmail({
       to: quote.client_email,
       subject: `Villa Quote for - ${quote.client_name || "Guest"}`,
       html: emailHtml,
-      attachments: [],
     });
-    console.log(`✅ Email enviado exitosamente`);
 
-    // ✅ NUEVO: Notificación Discord (non-blocking)
-    const totalPrice = itemsWithUrls.reduce((sum, item) => {
-      return sum + (Number(item.price_usd) || 0);
-    }, 0);
+    // 6) Actualizar DB
+    await client.query(
+      `UPDATE quotes SET status = 'sent', updated_at = NOW() WHERE id = $1`,
+      [id]
+    );
 
+    // 7) Notificar Discord (Calculando el total con los datos procesados)
+    const totalQuoteAmount = itemsWithFullData.reduce((sum, i) => sum + (i.breakdown?.totalGross || 0), 0);
+    
     notifySafely(() =>
       sendQuoteNotification({
         quoteId: id,
         clientEmail: quote.client_email,
         clientName: quote.client_name,
-        villas: itemsWithUrls.map((item) => ({
-          name: item.listing_name,
-          location: item.listing_location,
-          price: item.price_usd,
+        villas: itemsWithFullData.map(i => ({ 
+          name: i.listing_name, 
+          price: i.breakdown.totalGross 
         })),
         checkIn: checkInYmd,
         checkOut: checkOutYmd,
         guests: quote.guests,
-        totalPrice,
-        downloadUrl: itemsWithUrls[0]?.guestyUrl,
-      }),
-    );
-
-    // 7) Actualizar estado del quote
-    await client.query(
-      `UPDATE quotes SET status = 'sent', updated_at = NOW() WHERE id = $1`,
-      [id],
-    );
-
-    // 8) Registrar en historial
-    await client.query(
-      `INSERT INTO quote_history (quote_id, event_type, actor_user_id, payload)
-       VALUES ($1, 'EMAIL_SENT', $2, $3)`,
-      [
-        id,
-        userId,
-        JSON.stringify({
-          to: quote.client_email,
-          itemsCount: items.length,
-          checkIn: checkInYmd,
-          checkOut: checkOutYmd,
-          timestamp: new Date().toISOString(),
-        }),
-      ],
+        totalPrice: totalQuoteAmount,
+        downloadUrl: itemsWithFullData[0]?.guestyUrl,
+      })
     );
 
     await client.query("COMMIT");
-    console.log(`✅ Transaction committed - Email sent for quote ${id}`);
+    console.log(`✅ Email enviado correctamente para Quote ${id}`);
 
     return res.json({
       success: true,
       message: `Email enviado a ${quote.client_email}`,
-      itemsSent: items.length,
-      quoteId: id,
-      debugExampleUrl: itemsWithUrls[0]?.guestyUrl,
-      debugAllUrls: itemsWithUrls.map((i) => ({
-        listing_id: i.listing_id,
-        name: i.listing_name,
-        url: i.guestyUrl,
-      })),
+      quoteId: id
     });
+
   } catch (error) {
     await client.query("ROLLBACK");
     console.error("❌ Error enviando email de quote:", error);
-    console.error("Stack trace:", error.stack);
-
+    // IMPORTANTE: Devolver json para que el frontend no se cuelgue
     return res.status(500).json({
       error: "Error interno al enviar el email",
-      details:
-        process.env.NODE_ENV === "development" ? error.message : undefined,
+      details: process.env.NODE_ENV === "development" ? error.message : undefined,
     });
   } finally {
     client.release();
@@ -669,7 +639,7 @@ export async function sendQuoteEmail(req, res) {
 /**
  * Genera el HTML del email
  */
-function generateQuoteEmailHtml(quote, items) {
+export async function generateQuoteEmailHtml(quote, items, nights) {
   const formatDate = (dateStr) => {
     if (!dateStr) return "Flexible";
     return new Date(dateStr).toLocaleDateString("en-US", {
@@ -687,6 +657,8 @@ function generateQuoteEmailHtml(quote, items) {
       currency: "USD",
     }).format(amount);
   };
+
+  const safeNights = nights || 1;
 
   return `
   <!DOCTYPE html>
@@ -795,6 +767,7 @@ function generateQuoteEmailHtml(quote, items) {
         background: #f4f4f5;
         padding: 16px;
         border-radius: 6px;
+        padding: 16px;
         margin: 20px 0;
         text-align: center;
       }
@@ -809,7 +782,14 @@ function generateQuoteEmailHtml(quote, items) {
         font-size: 24px;
         font-weight: 600;
         color: #09090b;
+        align-items: center;
       }
+      .nightly-subtext {
+        font-size: 11px;
+        font-weight: 400;
+        color: #71717a;
+      }
+
       .btn { 
         display: inline-block;
         width: 100%;
@@ -891,63 +871,88 @@ function generateQuoteEmailHtml(quote, items) {
       
       <div class="content">
         <div class="date-info">
-          <p><strong>📅 Check-in:</strong> ${formatDate(quote.check_in)}</p>
-          <p><strong>📅 Check-out:</strong> ${formatDate(quote.check_out)}</p>
+          <p><strong>📅 Check-in:</strong> ${formatDate(quote.checkIn)}</p>
+          <p><strong>📅 Check-out:</strong> ${formatDate(quote.checkOut)}</p>
+          <p><strong>🌙 Nights:</strong> ${safeNights}</p>
           ${quote.guests ? `<p><strong>👥 Guests:</strong> ${quote.guests}</p>` : ""}
         </div>
   
         ${items
-          .map(
-            (item) => `
+          .map((item) => {
+            const b = item.breakdown;
+            if (!b) return ""; // O manejar error de villa no disponible
+
+            return `
           <div class="property-card">
-            ${item.image_url ? `<img src="${item.image_url}" class="property-image" alt="${item.listing_name}">` : ""}
+            ${item.image_url ? `<img src="${item.image_url}" class="property-image">` : ""}
             <div class="property-content">
               <h3>${item.listing_name || "Luxury Villa"}</h3>
-              
-              <div class="property-details">
-                <div class="property-detail">
-                  <strong>📍 Location:</strong> ${item.listing_location || "Contact for details"}
+              <p style="font-size:14px; color:#71717a; margin-bottom:12px;">📍 ${item.listing_location || "Contact for details"}</p>
+  
+              <div class="breakdown-container" style="background:#f9fafb; padding:15px; border-radius:8px;">
+                <div class="breakdown-row" style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:5px;">
+                  <span>Accommodation (${safeNights} nights)</span>
+                  <span>${formatCurrency(b.base, b.currency)}</span>
                 </div>
-                <div class="property-detail">
-                  <strong>🛏️ Bedrooms:</strong> ${item.bedrooms || "N/A"}
-                </div>
-                <div class="property-detail">
-                  <strong>🛁 Bathrooms:</strong> ${item.bathrooms || "N/A"}
+                
+                ${
+                  b.cleaning > 0
+                    ? `
+                <div class="breakdown-row" style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:5px;">
+                  <span>Cleaning Fee</span>
+                  <span>${formatCurrency(b.cleaning, b.currency)}</span>
+                </div>`
+                    : ""
+                }
+
+                ${
+                  b.taxes > 0
+                    ? `
+                <div class="breakdown-row" style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:5px;">
+                  <span>Taxes & VAT</span>
+                  <span>${formatCurrency(b.taxes, b.currency)}</span>
+                </div>`
+                    : ""
+                }
+
+                ${
+                  b.commission > 0
+                    ? `
+                <div class="breakdown-row" style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:5px; color:#16a34a;">
+                  <span>Service Fee</span>
+                  <span>${formatCurrency(b.commission, b.currency)}</span>
+                </div>`
+                    : ""
+                }
+
+               <div class="breakdown-row total">
+                  <div>
+                     Total Quote
+                     <div style="font-size:11px; font-weight:normal; color:#71717a;">
+                       avg ${formatCurrency(b.totalGross / safeNights, b.currency)} / night
+                     </div>
+                  </div>
+                  <span>${formatCurrency(b.totalGross, b.currency)}</span>
                 </div>
               </div>
   
-              <div class="price-tag">
-                <div class="label">Price per Night</div>
-                <div class="amount">${formatCurrency(item.price_usd)}</div>
+              <div style="margin-top:20px;">
+                <a href="${item.guestyUrl}" class="btn">View Availability & Book →</a>
               </div>
-  
-              <a href="${item.guestyUrl}" class="btn">View Availability & Book →</a>
-              <p class="btn-note">Your selected dates are pre-filled</p>
             </div>
           </div>
-        `,
-          )
+        `;
+          })
           .join("")}
-  
-        <div class="divider"></div>
-  
-        <div class="tip-box">
-          <p><strong>💡 Next Steps:</strong> Click the button on each villa to check real-time availability and finalize pricing for your dates.</p>
-        </div>
-  
-        <div class="footer">
-          <p><strong>Book with Confidence. Earn with Trust.</strong></p>
-          <p>This quote was generated by Villa Net — connecting you with the world's most vetted villas.</p>
-          <p>Questions? Contact your travel advisor.</p>
-          <div class="footer-meta">
-            Quote ID: ${quote.id} • Generated on ${new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}
-          </div>
+        
+        <div class="footer" style="text-align:center; margin-top:40px; color:#999; font-size:12px;">
+          <p>Quote ID: ${quote.id}</p>
         </div>
       </div>
     </div>
   </body>
   </html>
-    `;
+  `;
 }
 
 export async function checkQuotesAvailability(req, res) {
@@ -1299,5 +1304,53 @@ export async function calculateQuote(req, res) {
         ? { details: e?.response?.data || e.message }
         : {}),
     });
+  }
+}
+
+// Función auxiliar para obtener el desglose real de Guesty
+async function getGuestyBreakdown(
+  listingId,
+  checkIn,
+  checkOut,
+  guests,
+  commissionPct,
+) {
+  try {
+    // Reutilizamos el endpoint de tu calculadora
+    const payload = {
+      listingId,
+      checkInDateLocalized: checkIn,
+      checkOutDateLocalized: checkOut,
+      guestsCount: Number(guests) || 1,
+      source: "villanet_email_system",
+    };
+
+    const guestyResp = await guesty.post("/v1/quotes", payload);
+
+    // 🔥 USAMOS TU PARSER EXISTENTE (parseGuestyQuote)
+    const parsed = parseGuestyQuote(guestyResp?.data);
+
+    const base = Number(parsed.base) || 0;
+    const cleaning = Number(parsed.cleaning) || 0;
+    const taxes = Number(parsed.taxes) || 0;
+    const otherFees = Number(parsed.otherFees) || 0;
+
+    // Cálculo de comisión idéntico a la calculadora (Base + Limpieza + Taxes)
+    const subtotal = base + cleaning + taxes;
+    const commission = subtotal * (Number(commissionPct) / 100);
+    const totalGross = subtotal + commission + otherFees;
+
+    return {
+      base,
+      cleaning,
+      taxes,
+      otherFees,
+      commission,
+      totalGross,
+      currency: parsed.currency || "USD",
+    };
+  } catch (error) {
+    console.error(`⚠️ Breakdown falló para ${listingId}:`, error.message);
+    return null;
   }
 }
