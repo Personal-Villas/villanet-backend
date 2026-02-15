@@ -685,12 +685,13 @@ export async function generateQuoteEmailHtml(
 
   const safeNights = nights || 1;
 
-  const mapPin = `<img src="https://cdn-icons-png.flaticon.com/128/484/484167.png" width="14" height="14" style="vertical-align:middle; margin-right:4px; opacity:0.6;" alt="Location">`;
-  const guestIcon = `<img src="https://cdn-icons-png.flaticon.com/128/1077/1077063.png" width="14" height="14" style="vertical-align:middle; margin-right:4px; opacity:0.6;" alt="Guests">`;
-  const calendarIcon = `<img src="https://cdn-icons-png.flaticon.com/128/2838/2838779.png" width="14" height="14" style="vertical-align:middle; margin-right:4px; opacity:0.6;" alt="Calendar">`;
-  const nightsIcon = `<img src="https://cdn-icons-png.flaticon.com/128/606/606807.png" width="14" height="14" style="vertical-align:middle; margin-right:4px; opacity:0.6;" alt="Nights">`;
-  
-  
+  const mapPin = `<img src="https://img.icons8.com/?size=100&id=3723&format=png&color=697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Loc">`;
+  const guestIcon = `<img src="https://img.icons8.com/?size=100&id=fEZo4zNy3Mqa&format=png&color=697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Gst">`;
+  const bedIcon = `<img src="https://img.icons8.com/?size=100&id=7546&format=png&color=697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Bed">`;
+  const bathIcon = `<img src="https://img.icons8.com/?size=100&id=11485&format=png&color=#697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Bath">`;
+  const calendarIcon = `<img src="https://img.icons8.com/?size=100&id=23&format=png&color=697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Cal">`;
+  const nightsIcon = `<img src="https://img.icons8.com/?size=100&id=660&format=png&color=697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Ngt">`;
+
   return `
   <!DOCTYPE html>
   <html>
@@ -849,9 +850,9 @@ export async function generateQuoteEmailHtml(
     <div class="container">
       <div class="header">
         <div>
-          <span class="villanet-badge">villanet</span>
+          <h2 class="villanet-badge">villanet</h2>
         </div>
-        <h1>Your Curated Villa Options</h1>
+        <h1>Your Curated Villa Options with VillaNet</h1>
         <p>Hello ${quote.client_name || "Valued Guest"}!</p>
         <p>Based on your preferences, here is a selection of properties for your review</p>
 
@@ -875,8 +876,10 @@ export async function generateQuoteEmailHtml(
             ${item.image_url ? `<img src="${item.image_url}" class="property-image">` : ""}
             <div class="property-content">
               <h3>${item.listing_name || "Luxury Villa"}</h3>
-              <p style="font-size:14px; color:#71717a; margin-bottom:12px;">${mapPin} ${item.listing_location || "Contact for details"}</p>
-  
+              <p style="font-size:14px; color:#71717a; margin-bottom:12px;">${mapPin} ${item.listing_location}</p>
+              <p style="font-size:14px; color:#71717a; margin-bottom:12px;">${bedIcon} ${item.bedrooms} Bedrooms</p>
+              <p style="font-size:14px; color:#71717a; margin-bottom:12px;">${bathIcon} ${item.bathrooms} Bathrooms</p>
+
               <div class="breakdown-container">
                 <div class="breakdown-row">
                   <div class="breakdown-label">
@@ -902,24 +905,24 @@ export async function generateQuoteEmailHtml(
                     ? `
                 <div class="breakdown-row">
                   <div class="breakdown-label">
-                    Taxes & Fees
+                    Taxes
                   </div>
                   <span class="breakdown-value">${formatCurrency(b.taxes, b.currency)}</span>
                 </div>`
                     : ""
                 }
 
-                ${
-                  b.commission_rate > 0
-                    ? `
-                <div class="breakdown-row" style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:5px; color:#16a34a;">
-                  <div class="breakdown-label">
-                    Service Fee
-                  </div>
-                  <span class="breakdown-value">${formatCurrency(b.commission_rate, b.currency)}</span>
-                </div>`
-                    : ""
-                }
+                ${b.otherFees > 0 ? `
+              <div class="breakdown-row">
+                <span class="breakdown-label">Resort / Other Fees</span>
+                <span class="breakdown-amount">${formatCurrency(b.otherFees)}</span>
+              </div>` : ''}
+
+              ${b.commission > 0 ? `
+              <div class="breakdown-row">
+                <span class="breakdown-label">Service Fee</span>
+                <span class="breakdown-value">${formatCurrency(b.commission)}</span>
+              </div>` : ''}
 
                <div class="breakdown-row">
                   <div class="breakdown-label">
@@ -939,7 +942,8 @@ export async function generateQuoteEmailHtml(
           .join("")}
         
         <div class="footer">
-          <p>These properties are professionally managed and vetted for service standards and accuracy.</p>
+          <p>Book with Confidence. Earn with Trust.</p>
+          <p>This quote was generated by VillaNet — connecting you with the world’s most vetted villas.</p>
           <p>Questions? Contact your travel advisor directly.</p>
         </div>
         <div style="display:none; white-space:nowrap; font:15px courier; line-height:0;">
