@@ -246,45 +246,51 @@ function buildGuestyUrl({
 /**
  * POST /quotes
  * Crea un nuevo quote con sus items
+ * ACTUALIZADO: Ahora usa guestFirstName, guestLastName, travelAdvisorEmail, guestEmail
  */
 export async function createQuote(req, res) {
   const client = await pool.connect();
 
   try {
-    const { clientName, clientEmail, checkIn, checkOut, guests, items } =
-      req.body;
+    const {
+      guestFirstName,
+      guestLastName,
+      travelAdvisorEmail,
+      guestEmail,
+      checkIn,
+      checkOut,
+      guests,
+      items,
+    } = req.body;
 
     console.log("📥 CREATE QUOTE - Request body:", {
-      clientName,
-      clientEmail,
+      guestFirstName,
+      guestLastName,
+      travelAdvisorEmail,
+      guestEmail,
       checkIn,
       checkOut,
       guests,
       itemsCount: items?.length,
     });
 
-    // Validaciones básicas
-    if (!clientEmail) {
-      console.error("❌ clientEmail missing");
-      return res.status(400).json({ error: "clientEmail es requerido" });
-    }
+    // Validaciones
     if (!Array.isArray(items) || items.length === 0) {
-      console.error("❌ items missing or empty");
-      return res
-        .status(400)
-        .json({ error: "Debe incluir al menos una propiedad en items" });
+      return res.status(400).json({
+        error:
+          "El array 'items' es requerido y debe contener al menos una propiedad",
+      });
     }
 
-    // 🔍 LOG: Verificar dominios que llegan
-    console.log("🔍 INCOMING ITEMS - guestyBookingDomain check:");
-    items.forEach((item, idx) => {
-      console.log(
-        `  [${idx}] listing_id: ${item.id}, guestyBookingDomain: "${item.guestyBookingDomain}"`,
-      );
-      if (!item.guestyBookingDomain) {
-        console.warn(`  ⚠️  Item ${item.id} NO tiene guestyBookingDomain!`);
-      }
-    });
+    // Validar que todos los items tengan ID
+    const invalidItems = items.filter((item) => !item.id);
+    if (invalidItems.length > 0) {
+      console.error("❌ Items sin ID:", invalidItems);
+      return res.status(400).json({
+        error: "Todos los items deben tener un ID válido",
+        invalidItems,
+      });
+    }
 
     await client.query("BEGIN");
 
@@ -292,18 +298,22 @@ export async function createQuote(req, res) {
     const quoteQuery = await client.query(
       `INSERT INTO quotes (
         created_by_user_id, 
-        client_name, 
-        client_email, 
+        guest_first_name, 
+        guest_last_name, 
+        travel_advisor_email, 
+        guest_email,
         check_in, 
         check_out, 
         guests, 
         status
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'draft')
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft')
       RETURNING id, created_at`,
       [
-        req.user.id, // viene del middleware auth
-        clientName || null,
-        clientEmail,
+        req.user?.id || null, // viene del middleware auth (puede ser null si no hay auth)
+        guestFirstName?.trim() || null,
+        guestLastName?.trim() || null,
+        travelAdvisorEmail?.trim() || null,
+        guestEmail?.trim() || null,
         checkIn || null,
         checkOut || null,
         guests || null,
@@ -370,10 +380,13 @@ export async function createQuote(req, res) {
       ) VALUES ($1, 'CREATED', $2, $3)`,
       [
         quoteId,
-        req.user.id,
+        req.user?.id || null,
         JSON.stringify({
           itemsCount: items.length,
-          clientEmail,
+          guestFirstName,
+          guestLastName,
+          travelAdvisorEmail,
+          guestEmail,
           checkIn,
           checkOut,
         }),
@@ -473,43 +486,131 @@ export async function getQuoteDetails(req, res) {
 }
 /**
  * POST /quotes/:id/send
- * Envía el email. Maneja fechas nulas (Flexibles) y define 'items' correctamente.
+ * Envía el email al Travel Advisor (siempre) y opcionalmente al Guest
+ * ACTUALIZADO: Maneja guestFirstName, guestLastName, travelAdvisorEmail, guestEmail
  */
 export async function sendQuoteEmail(req, res) {
   const client = await pool.connect();
 
   try {
     const { id } = req.params;
-    const userId = req.user.id; // Puede ser undefined si no hay auth middleware estricto, no es crítico para el envío
+    const {
+      guestFirstName,
+      guestLastName,
+      travelAdvisorEmail,
+      guestEmail,
+      checkIn,
+      checkOut,
+      guests,
+      items,
+    } = req.body;
+    const userId = req.user?.id;
 
-    console.log(`📧 SEND QUOTE EMAIL - Quote ID: ${id}`);
+    console.log(`📧 SEND QUOTE EMAIL - Quote ID: ${id}`, {
+      guestFirstName,
+      guestLastName,
+      travelAdvisorEmail,
+      guestEmail,
+      checkIn,
+      checkOut,
+      guests,
+      itemsCount: items?.length,
+    });
+
+    // ===== VALIDACIONES DE CAMPOS REQUERIDOS =====
+    if (!guestFirstName?.trim()) {
+      return res.status(400).json({
+        ok: false,
+        error: "Guest first name is required",
+      });
+    }
+
+    if (!guestLastName?.trim()) {
+      return res.status(400).json({
+        ok: false,
+        error: "Guest last name is required",
+      });
+    }
+
+    if (!travelAdvisorEmail?.trim()) {
+      return res.status(400).json({
+        ok: false,
+        error: "Travel advisor email is required",
+      });
+    }
+
+    // Validación de formato de email
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(travelAdvisorEmail)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid travel advisor email format",
+      });
+    }
+
+    if (guestEmail && !emailRegex.test(guestEmail)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid guest email format",
+      });
+    }
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "Items array is required and must contain at least one property",
+      });
+    }
 
     await client.query("BEGIN");
 
-    // 1) Obtener el quote
-    const quoteResult = await client.query(
-      `SELECT * FROM quotes WHERE id = $1 AND status = 'draft' FOR UPDATE`,
-      [id],
+    // 1) Actualizar el quote con los nuevos datos
+    const updateResult = await client.query(
+      `UPDATE quotes 
+       SET 
+         guest_first_name = $2,
+         guest_last_name = $3,
+         travel_advisor_email = $4,
+         guest_email = $5,
+         check_in = $6,
+         check_out = $7,
+         guests = $8,
+         updated_at = NOW()
+       WHERE id = $1 AND status = 'draft'
+       RETURNING *`,
+      [
+        id,
+        guestFirstName.trim(),
+        guestLastName.trim(),
+        travelAdvisorEmail.trim(),
+        guestEmail?.trim() || null,
+        checkIn || null,
+        checkOut || null,
+        guests || null,
+      ],
     );
 
-    if (quoteResult.rows.length === 0) {
+    if (updateResult.rows.length === 0) {
       await client.query("ROLLBACK");
-      return res
-        .status(404)
-        .json({ error: "Quote no encontrado o ya enviado" });
+      return res.status(404).json({
+        ok: false,
+        error: "Quote no encontrado o ya enviado",
+      });
     }
 
-    const quote = quoteResult.rows[0];
+    const quote = updateResult.rows[0];
 
-    // 🔥 DEBUG: Verificamos qué viene exactamente de la BD
-    console.log("🔍 DATOS CRUDOS DB:", {
+    console.log("🔍 QUOTE ACTUALIZADO:", {
       id: quote.id,
-      check_in_db: quote.check_in,
-      check_out_db: quote.check_out,
-      client_email: quote.client_email,
+      guest_first_name: quote.guest_first_name,
+      guest_last_name: quote.guest_last_name,
+      travel_advisor_email: quote.travel_advisor_email,
+      guest_email: quote.guest_email,
+      check_in: quote.check_in,
+      check_out: quote.check_out,
     });
 
-    // 2) Obtener items (villas)
+    // 2) Obtener items (villas) del quote existente
     const itemsResult = await client.query(
       `SELECT qi.*, COALESCE(l.villanet_commission_rate, 0) as commission_rate 
        FROM quote_items qi
@@ -518,11 +619,14 @@ export async function sendQuoteEmail(req, res) {
       [id],
     );
 
-    const items = itemsResult.rows;
+    const dbItems = itemsResult.rows;
 
-    if (items.length === 0) {
+    if (dbItems.length === 0) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ error: "El quote no tiene propiedades" });
+      return res.status(400).json({
+        ok: false,
+        error: "El quote no tiene propiedades",
+      });
     }
 
     // --- PREPARACIÓN DE DATOS ---
@@ -541,10 +645,10 @@ export async function sendQuoteEmail(req, res) {
 
     // 3) Procesamiento Paralelo
     const itemsWithFullData = await Promise.all(
-      items.map(async (item) => {
+      dbItems.map(async (item) => {
         let breakdown = null;
 
-        // Solo llamamos a Guesty si tenemos fechas. Si es flexible, saltamos este paso.
+        // Solo llamamos a Guesty si tenemos fechas
         if (hasDates) {
           breakdown = await getGuestyBreakdown(
             item.listing_id,
@@ -555,7 +659,7 @@ export async function sendQuoteEmail(req, res) {
           );
         }
 
-        // Generar URL (Guesty maneja URLs sin fechas, solo lleva al listing)
+        // Generar URL
         const guestyUrl = buildGuestyUrl({
           domainOrUrl: item.guesty_booking_domain || "https://book.guesty.com",
           listingId: item.listing_id,
@@ -564,15 +668,16 @@ export async function sendQuoteEmail(req, res) {
           guests: quote.guests,
         });
 
-        // Fallback: Si no hay breakdown (por fechas nulas o error api), calculamos el base localmente
+        // Fallback si no hay breakdown
         const finalBreakdown = breakdown || {
           base: Number(item.price_usd) * nights,
           taxes: 0,
           cleaning: 0,
-          commission_rate: 0,
+          otherFees: 0,
+          commission: 0,
           totalGross: Number(item.price_usd) * nights,
           currency: "USD",
-          isEstimate: true, // Marca para el frontend/email
+          isEstimate: true,
         };
 
         return {
@@ -583,31 +688,84 @@ export async function sendQuoteEmail(req, res) {
       }),
     );
 
-    // 4) Generar HTML
-    // Pasamos 'nights' explícitamente para que el template no falle
-    const emailHtml = await generateQuoteEmailHtml(
-      quote,
+    // 4) Generar HTML para el Travel Advisor
+    const advisorEmailHtml = await generateQuoteEmailHtml(
+      {
+        ...quote,
+        recipient_type: "advisor", // Indicador para personalizar el template
+      },
       itemsWithFullData,
       nights,
       checkInYmd,
       checkOutYmd,
     );
 
-    // 5) Enviar email
-    console.log(`📮 Enviando email a: ${quote.client_email}`);
+    // 5) Enviar email al Travel Advisor (SIEMPRE)
+    console.log(
+      `📮 Enviando email al Travel Advisor: ${quote.travel_advisor_email}`,
+    );
     await sendEmail({
-      to: quote.client_email,
-      subject: `Your Curated Villa Options from - ${quote.client_name || "Guest"}`,
-      html: emailHtml,
+      to: quote.travel_advisor_email,
+      subject: `Your Quote for ${quote.guest_first_name} ${quote.guest_last_name}`,
+      html: advisorEmailHtml,
     });
 
-    // 6) Actualizar DB
+    // 6) Enviar email al Guest (SOLO si guestEmail existe)
+    if (quote.guest_email?.trim()) {
+      console.log(`📮 Enviando email al Guest: ${quote.guest_email}`);
+
+      // Generar HTML para el Guest (puede ser diferente del advisor)
+      const guestEmailHtml = await generateQuoteEmailHtml(
+        {
+          ...quote,
+          recipient_type: "guest", // Indicador para personalizar el template
+        },
+        itemsWithFullData,
+        nights,
+        checkInYmd,
+        checkOutYmd,
+      );
+
+      await sendEmail({
+        to: quote.guest_email,
+        subject: `Your Curated Villa Options - ${quote.guest_first_name} ${quote.guest_last_name}`,
+        html: guestEmailHtml,
+      });
+    } else {
+      console.log(`ℹ️  No se enviará email al guest (no proporcionado)`);
+    }
+
+    // 7) Actualizar status del quote
     await client.query(
       `UPDATE quotes SET status = 'sent', updated_at = NOW() WHERE id = $1`,
       [id],
     );
 
-    // 7) Notificar Discord (Calculando el total con los datos procesados)
+    // 8) Registrar en historial
+    await client.query(
+      `INSERT INTO quote_history (
+        quote_id, 
+        event_type, 
+        actor_user_id, 
+        payload
+      ) VALUES ($1, 'SENT', $2, $3)`,
+      [
+        id,
+        userId || null,
+        JSON.stringify({
+          guestFirstName: quote.guest_first_name,
+          guestLastName: quote.guest_last_name,
+          travelAdvisorEmail: quote.travel_advisor_email,
+          guestEmailSent: !!quote.guest_email,
+          checkIn: checkInYmd,
+          checkOut: checkOutYmd,
+          guests: quote.guests,
+          itemsCount: itemsWithFullData.length,
+        }),
+      ],
+    );
+
+    // 9) Notificar Discord
     const totalQuoteAmount = itemsWithFullData.reduce(
       (sum, i) => sum + (i.breakdown?.totalGross || 0),
       0,
@@ -616,8 +774,9 @@ export async function sendQuoteEmail(req, res) {
     notifySafely(() =>
       sendQuoteNotification({
         quoteId: id,
-        clientEmail: quote.client_email,
-        clientName: quote.client_name,
+        guestName: `${quote.guest_first_name} ${quote.guest_last_name}`,
+        advisorEmail: quote.travel_advisor_email,
+        guestEmail: quote.guest_email || "Not provided",
         villas: itemsWithFullData.map((i) => ({
           name: i.listing_name,
           price: i.breakdown.totalGross,
@@ -631,18 +790,26 @@ export async function sendQuoteEmail(req, res) {
     );
 
     await client.query("COMMIT");
-    console.log(`✅ Email enviado correctamente para Quote ${id}`);
+    console.log(`✅ Email(s) enviado(s) correctamente para Quote ${id}`);
 
     return res.json({
       success: true,
-      message: `Email enviado a ${quote.client_email}`,
+      message: guestEmail
+        ? `Emails enviados a ${quote.travel_advisor_email} y ${quote.guest_email}`
+        : `Email enviado a ${quote.travel_advisor_email}`,
       quoteId: id,
+      emailsSent: {
+        advisor: quote.travel_advisor_email,
+        guest: quote.guest_email || null,
+      },
     });
   } catch (error) {
     await client.query("ROLLBACK");
     console.error("❌ Error enviando email de quote:", error);
-    // IMPORTANTE: Devolver json para que el frontend no se cuelgue
+    console.error("Stack trace:", error.stack);
+
     return res.status(500).json({
+      ok: false,
       error: "Error interno al enviar el email",
       details:
         process.env.NODE_ENV === "development" ? error.message : undefined,
@@ -684,6 +851,20 @@ export async function generateQuoteEmailHtml(
   };
 
   const safeNights = nights || 1;
+
+  // Detectar tipo de recipient
+  const isAdvisor = quote.recipient_type === "advisor";
+  const isGuest = quote.recipient_type === "guest";
+
+  // Personalizar saludo
+  const greeting = isGuest
+    ? `Dear ${quote.guest_first_name}`
+    : `Dear Travel Advisor`;
+
+  // Personalizar mensaje
+  const introMessage = isGuest
+    ? `Based on your preferences, here are the curated villa options selected for you:`
+    : `Based on your preferences, here is the quote for your client ${quote.guest_first_name} ${quote.guest_last_name}`;
 
   const mapPin = `<img src="https://img.icons8.com/?size=100&id=3723&format=png&color=697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Loc">`;
   const guestIcon = `<img src="https://img.icons8.com/?size=100&id=fEZo4zNy3Mqa&format=png&color=697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Gst">`;
@@ -853,8 +1034,8 @@ export async function generateQuoteEmailHtml(
           <h2 class="villanet-badge">villanet</h2>
         </div>
         <h1>Your Curated Villa Options with VillaNet</h1>
-        <p>Hello ${quote.client_name || "Valued Guest"}!</p>
-        <p>Based on your preferences, here is a selection of properties for your review</p>
+        <p>Hello ${greeting}!</p>
+        <p>${introMessage}</p>
 
       </div>
       
@@ -912,17 +1093,25 @@ export async function generateQuoteEmailHtml(
                     : ""
                 }
 
-                ${b.otherFees > 0 ? `
+                ${
+                  b.otherFees > 0
+                    ? `
               <div class="breakdown-row">
                 <span class="breakdown-label">Resort / Other Fees</span>
                 <span class="breakdown-amount">${formatCurrency(b.otherFees)}</span>
-              </div>` : ''}
+              </div>`
+                    : ""
+                }
 
-              ${b.commission > 0 ? `
+              ${
+                b.commission > 0
+                  ? `
               <div class="breakdown-row">
                 <span class="breakdown-label">Service Fee</span>
                 <span class="breakdown-value">${formatCurrency(b.commission)}</span>
-              </div>` : ''}
+              </div>`
+                  : ""
+              }
 
                <div class="breakdown-row">
                   <div class="breakdown-label">
@@ -947,7 +1136,7 @@ export async function generateQuoteEmailHtml(
           <p>Questions? Contact your travel advisor directly.</p>
         </div>
         <div style="display:none; white-space:nowrap; font:15px courier; line-height:0;">
-          ${crypto.randomBytes(8).toString('hex')}
+          ${crypto.randomBytes(8).toString("hex")}
         </div>
       </div>
     </body>
