@@ -752,13 +752,12 @@ export async function calculateQuote(req, res) {
 
     console.log(`🧩 [${requestId}] Parsed breakdown`, parsed);
 
-    const baseSubtotal = Number(parsed.base) || 0;
-    const cleaningFee = Number(parsed.cleaning) || 0;
-    const taxesTotal = Number(parsed.taxes) || 0;
+    const base     = Number(parsed.base)     || 0;
+    const cleaning = Number(parsed.cleaning) || 0;
+    const taxes    = Number(parsed.taxes)    || 0;
 
-    const subtotal = baseSubtotal + cleaningFee + taxesTotal;
-    const commission = subtotal * (commissionPct / 100);
-    const totalGross = subtotal + commission;
+    const commission = (base * commissionPct) / 100;
+    const totalGross = base + taxes + commission;
 
     // ✅ AJUSTE: Aplicar redondeo money2 a todos los valores monetarios
     const response = {
@@ -766,9 +765,9 @@ export async function calculateQuote(req, res) {
       currency: parsed.currency,
       nights,
       breakdown: {
-        base: money2(baseSubtotal),
-        cleaning: money2(cleaningFee),
-        taxes: money2(taxesTotal),
+        base: money2(base),
+        cleaning: money2(cleaning),
+        taxes: money2(taxes),
         commissionPct,
         commission: money2(commission),
         totalGross: money2(totalGross),
@@ -943,10 +942,10 @@ async function getGuestyBreakdown(listingId, checkIn, checkOut, guests, commissi
   const cleaning = Number(parsed.cleaning) || 0;
   const taxes = Number(parsed.taxes) || 0;
   const otherFees = Number(parsed.otherFees) || 0;
-  
-  const totalGross = base + cleaning + taxes + otherFees;
   const commission = (base * commissionPct) / 100;
 
+  const totalGross = base + cleaning + taxes + otherFees + commission;
+  
   return {
     base,
     cleaning,
