@@ -6,20 +6,20 @@ import {
 } from "../services/availability.service.js";
 import pLimit from "p-limit";
 import { guesty } from "../services/guestyClient.js";
+import { getBookingEngineQuote } from "../services/bookingEngine.service.js";
 import crypto from "crypto";
 import {
   sendQuoteNotification,
   notifySafely,
 } from "../services/discordNotification.service.js";
 
-// noches de estadía: from..to-1
+// ─── Date helpers ─────────────────────────────────────────────────────────────
+
 function countStayNights(from, to) {
   const start = new Date(from);
-  const end = new Date(to);
-  if (isNaN(start.getTime()) || isNaN(end.getTime())) return 0;
-  if (start >= end) return 0;
-  const ms = end.getTime() - start.getTime();
-  return Math.max(0, Math.round(ms / (1000 * 60 * 60 * 24)));
+  const end   = new Date(to);
+  if (isNaN(start.getTime()) || isNaN(end.getTime()) || start >= end) return 0;
+  return Math.max(0, Math.round((end - start) / 86400000));
 }
 
 function ymd10(s) {
@@ -27,72 +27,74 @@ function ymd10(s) {
   const str = String(s).trim();
   if (/^\d{4}-\d{2}-\d{2}/.test(str)) return str.slice(0, 10);
   const d = new Date(str);
-  if (isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10);
+  return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
 }
+
+function toYmd(d) {
+  if (!d) return null;
+  if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  const dt = new Date(d);
+  return Number.isNaN(dt.getTime()) ? null : dt.toISOString().split("T")[0];
+}
+
+// ─── URL helpers ──────────────────────────────────────────────────────────────
+
+function normalizeBaseUrl(domainOrUrl) {
+  if (!domainOrUrl || typeof domainOrUrl !== "string") return "https://book.guesty.com";
+  const raw = domainOrUrl.trim().replace(/\/+$/, "");
+  const withProto = raw.startsWith("http://") || raw.startsWith("https://") ? raw : `https://${raw}`;
+  return withProto.replace(/\/+$/, "");
+}
+
+function buildGuestyUrl({ domainOrUrl, listingId, checkInYmd, checkOutYmd, guests }) {
+  const base = normalizeBaseUrl(domainOrUrl);
+  const url  = new URL(base);
+  const id   = encodeURIComponent(String(listingId));
+
+  url.pathname = url.host.endsWith("guestybookings.com")
+    ? `/en/properties/${id}`
+    : `/villas/${id}`;
+
+  const g = Number(guests);
+  url.searchParams.set("minOccupancy", String(Number.isFinite(g) && g > 0 ? g : 1));
+  if (checkInYmd)  url.searchParams.set("checkIn",  checkInYmd);
+  if (checkOutYmd) url.searchParams.set("checkOut", checkOutYmd);
+  return url.toString();
+}
+
+// ─── Controllers ──────────────────────────────────────────────────────────────
 
 export async function quotesAvailabilityCheck(req, res) {
   try {
-    const checkIn = ymd10(req.body?.checkIn);
+    const checkIn  = ymd10(req.body?.checkIn);
     const checkOut = ymd10(req.body?.checkOut);
-    const strict = Boolean(req.body?.strict); // opcional
-    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    const strict   = Boolean(req.body?.strict);
+    const items    = Array.isArray(req.body?.items) ? req.body.items : [];
 
-    if (!checkIn || !checkOut) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "checkIn/checkOut requeridos (YYYY-MM-DD)" });
-    }
-    if (new Date(checkIn) >= new Date(checkOut)) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "checkOut debe ser posterior a checkIn" });
-    }
-    if (!items.length) {
+    if (!checkIn || !checkOut)
+      return res.status(400).json({ ok: false, error: "checkIn/checkOut requeridos (YYYY-MM-DD)" });
+    if (new Date(checkIn) >= new Date(checkOut))
+      return res.status(400).json({ ok: false, error: "checkOut debe ser posterior a checkIn" });
+    if (!items.length)
       return res.status(400).json({ ok: false, error: "items[] requerido" });
-    }
 
-    const ids = [
-      ...new Set(
-        items
-          .map((x) => String(x?.id || x?.listingId || "").trim())
-          .filter(Boolean),
-      ),
-    ];
-    if (!ids.length) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "No hay listing IDs válidos" });
-    }
+    const ids = [...new Set(items.map((x) => String(x?.id || x?.listingId || "").trim()).filter(Boolean))];
+    if (!ids.length)
+      return res.status(400).json({ ok: false, error: "No hay listing IDs válidos" });
 
     const nights = countStayNights(checkIn, checkOut);
+    const quick  = await getAvailabilityFor(ids, checkIn, checkOut);
+    const byId   = new Map(quick.map((r) => [String(r.listing_id), r]));
 
-    // 1) check rápido (batch, cache)
-    const quick = await getAvailabilityFor(ids, checkIn, checkOut);
-    // quick: [{ listing_id, available, nightlyFrom, daysCount, hasRestrictions }]
-
-    // Convertimos a mapa para lookup
-    const byId = new Map(quick.map((r) => [String(r.listing_id), r]));
-
-    // 2) armar response base
-    // available:
-    // - true => ok
-    // - false => no disponible
-    // - null => unknown (no data / incompleto / fallo)
     const results = ids.map((id) => {
       const r = byId.get(String(id));
-      if (!r) {
-        return { listingId: id, available: null, reason: "no-result" };
-      }
+      if (!r) return { listingId: id, available: null, reason: "no-result" };
 
-      // Heurística: si no tengo days suficientes, lo marco unknown (para no bloquear injustamente)
-      // daysCount debería ser == nights (o >0) si vino bien la data
       if (!Number.isFinite(r.daysCount) || r.daysCount < nights) {
         return {
           listingId: id,
           available: null,
-          reason:
-            r.daysCount === 0 ? "no-calendar-data" : "partial-calendar-data",
+          reason: r.daysCount === 0 ? "no-calendar-data" : "partial-calendar-data",
           meta: { daysCount: r.daysCount ?? null, nights },
         };
       }
@@ -101,47 +103,27 @@ export async function quotesAvailabilityCheck(req, res) {
         listingId: id,
         available: Boolean(r.available),
         reason: r.available ? undefined : "unavailable",
-        meta: {
-          nightlyFrom: r.nightlyFrom ?? null,
-          hasRestrictions: Boolean(r.hasRestrictions),
-          daysCount: r.daysCount ?? null,
-          nights,
-        },
+        meta: { nightlyFrom: r.nightlyFrom ?? null, hasRestrictions: Boolean(r.hasRestrictions), daysCount: r.daysCount ?? null, nights },
       };
     });
 
-    // 3) opcional: strict CTA/CTD solo para los que quedaron true (o unknown si querés)
     if (strict) {
-      const limit = pLimit(2);
-      const strictIds = results
-        .filter((x) => x.available === true)
-        .map((x) => x.listingId);
-
+      const limit      = pLimit(2);
+      const strictIds  = results.filter((x) => x.available === true).map((x) => x.listingId);
       const strictPairs = await Promise.all(
         strictIds.map((id) =>
           limit(async () => {
-            try {
-              const ok = await checkStrictAvailability(id, checkIn, checkOut);
-              return [id, ok];
-            } catch {
-              return [id, null];
-            }
-          }),
-        ),
+            try { return [id, await checkStrictAvailability(id, checkIn, checkOut)]; }
+            catch { return [id, null]; }
+          })
+        )
       );
-
       const strictMap = new Map(strictPairs);
-
       for (const r of results) {
         if (r.available === true && strictMap.has(r.listingId)) {
           const ok = strictMap.get(r.listingId);
-          if (ok === false) {
-            r.available = false;
-            r.reason = "restricted-cta-ctd";
-          } else if (ok === null) {
-            r.available = null;
-            r.reason = "strict-check-failed";
-          }
+          if (ok === false) { r.available = false; r.reason = "restricted-cta-ctd"; }
+          else if (ok === null) { r.available = null; r.reason = "strict-check-failed"; }
         }
       }
     }
@@ -149,1077 +131,460 @@ export async function quotesAvailabilityCheck(req, res) {
     return res.json({ ok: true, results });
   } catch (e) {
     console.error("❌ /quotes/availability-check error:", e);
-    return res
-      .status(500)
-      .json({ ok: false, error: "Error interno", details: e.message });
+    return res.status(500).json({ ok: false, error: "Error interno", details: e.message });
   }
 }
 
-// ================ HELPERS ================
-
-/**
- * Convierte una fecha a formato YYYY-MM-DD (UTC)
- * @param {any} d - Fecha a convertir (Date, string, etc.)
- * @returns {string|null} Fecha en formato YYYY-MM-DD o null si no es válida
- */
-function toYmd(d) {
-  if (!d) return null;
-
-  // si ya viene "YYYY-MM-DD"
-  if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
-
-  const dt = new Date(d);
-  if (Number.isNaN(dt.getTime())) return null;
-
-  return dt.toISOString().split("T")[0];
-}
-
-/**
- * Normaliza una URL o dominio de Guesty a base URL consistente
- * @param {string} domainOrUrl - Dominio o URL completa
- * @returns {string} URL base normalizada
- */
-function normalizeBaseUrl(domainOrUrl) {
-  if (!domainOrUrl || typeof domainOrUrl !== "string")
-    return "https://book.guesty.com";
-
-  const raw = domainOrUrl.trim().replace(/\/+$/, "");
-  const withProto =
-    raw.startsWith("http://") || raw.startsWith("https://")
-      ? raw
-      : `https://${raw}`;
-
-  return withProto.replace(/\/+$/, "");
-}
-
-/**
- * Construye URL de Guesty con parámetros pre-llenados
- * ✅ VERSIÓN CORREGIDA para *.guestybookings.com y book.guesty.com
- * @param {Object} params
- * @param {string} params.domainOrUrl - Dominio o URL de Guesty
- * @param {string|number} params.listingId - ID de la propiedad
- * @param {string} [params.checkInYmd] - Check-in en formato YYYY-MM-DD
- * @param {string} [params.checkOutYmd] - Check-out en formato YYYY-MM-DD
- * @param {number} [params.guests] - Número de huéspedes (para minOccupancy)
- * @returns {string} URL completa de Guesty
- */
-function buildGuestyUrl({
-  domainOrUrl,
-  listingId,
-  checkInYmd,
-  checkOutYmd,
-  guests,
-}) {
-  const base = normalizeBaseUrl(domainOrUrl);
-  const url = new URL(base);
-
-  const host = url.host;
-  const id = encodeURIComponent(String(listingId));
-
-  // ✅ 1) Portales custom: *.guestybookings.com
-  if (host.endsWith("guestybookings.com")) {
-    url.pathname = `/en/properties/${id}`;
-  }
-  // ✅ 2) book.guesty.com (siempre /villas/:id)
-  else if (host === "book.guesty.com") {
-    url.pathname = `/villas/${id}`;
-  }
-  // ✅ 3) fallback genérico
-  else {
-    url.pathname = `/villas/${id}`;
-  }
-
-  // ✅ minOccupancy: SIEMPRE enviar (default 1)
-  const g = Number(guests);
-  const occupancy = Number.isFinite(g) && g > 0 ? g : 1;
-  url.searchParams.set("minOccupancy", String(occupancy));
-
-  // ✅ Query params como en el ejemplo real (camelCase)
-  if (checkInYmd) url.searchParams.set("checkIn", checkInYmd);
-  if (checkOutYmd) url.searchParams.set("checkOut", checkOutYmd);
-
-  return url.toString();
-}
-
-// ================ CONTROLLERS ================
-
-/**
- * POST /quotes
- * Crea un nuevo quote con sus items
- * ACTUALIZADO: Ahora usa guestFirstName, guestLastName, travelAdvisorEmail, guestEmail
- */
 export async function createQuote(req, res) {
   const client = await pool.connect();
-
   try {
-    const {
-      guestFirstName,
-      guestLastName,
-      travelAdvisorEmail,
-      guestEmail,
-      checkIn,
-      checkOut,
-      guests,
-      items,
-    } = req.body;
+    const { guestFirstName, guestLastName, travelAdvisorEmail, guestEmail, checkIn, checkOut, guests, items } = req.body;
 
-    console.log("📥 CREATE QUOTE - Request body:", {
-      guestFirstName,
-      guestLastName,
-      travelAdvisorEmail,
-      guestEmail,
-      checkIn,
-      checkOut,
-      guests,
-      itemsCount: items?.length,
-    });
+    if (!Array.isArray(items) || items.length === 0)
+      return res.status(400).json({ error: "El array 'items' es requerido y debe contener al menos una propiedad" });
 
-    // Validaciones
-    if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({
-        error:
-          "El array 'items' es requerido y debe contener al menos una propiedad",
-      });
-    }
-
-    // Validar que todos los items tengan ID
     const invalidItems = items.filter((item) => !item.id);
-    if (invalidItems.length > 0) {
-      console.error("❌ Items sin ID:", invalidItems);
-      return res.status(400).json({
-        error: "Todos los items deben tener un ID válido",
-        invalidItems,
-      });
-    }
+    if (invalidItems.length > 0)
+      return res.status(400).json({ error: "Todos los items deben tener un ID válido", invalidItems });
 
     await client.query("BEGIN");
 
-    // 1) Crear el quote principal
     const quoteQuery = await client.query(
-      `INSERT INTO quotes (
-        created_by_user_id, 
-        guest_first_name, 
-        guest_last_name, 
-        travel_advisor_email, 
-        guest_email,
-        check_in, 
-        check_out, 
-        guests, 
-        status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft')
-      RETURNING id, created_at`,
-      [
-        req.user?.id || null, // viene del middleware auth (puede ser null si no hay auth)
-        guestFirstName?.trim() || null,
-        guestLastName?.trim() || null,
-        travelAdvisorEmail?.trim() || null,
-        guestEmail?.trim() || null,
-        checkIn || null,
-        checkOut || null,
-        guests || null,
-      ],
+      `INSERT INTO quotes (created_by_user_id, guest_first_name, guest_last_name, travel_advisor_email, guest_email, check_in, check_out, guests, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft') RETURNING id, created_at`,
+      [req.user?.id || null, guestFirstName?.trim() || null, guestLastName?.trim() || null,
+       travelAdvisorEmail?.trim() || null, guestEmail?.trim() || null,
+       checkIn || null, checkOut || null, guests || null]
     );
-
     const quoteId = quoteQuery.rows[0].id;
-    console.log(`✅ Quote creado con ID: ${quoteId}`);
 
-    // 2) Insertar cada item del quote
     for (const item of items) {
-      if (!item.id) {
-        throw new Error(`Item sin ID: ${JSON.stringify(item)}`);
-      }
-
-      // Validar que tenga el dominio de Guesty
-      if (!item.guestyBookingDomain) {
-        console.error(
-          `❌ CRITICAL: Falta guestyBookingDomain para listing ${item.id}`,
-        );
-        throw new Error(
-          `Falta guestyBookingDomain para la propiedad ${item.id}`,
-        );
-      }
-
-      console.log(
-        `💾 Insertando item: ${item.id} con domain: ${item.guestyBookingDomain}`,
-      );
+      if (!item.id) throw new Error(`Item sin ID: ${JSON.stringify(item)}`);
+      if (!item.guestyBookingDomain) throw new Error(`Falta guestyBookingDomain para la propiedad ${item.id}`);
 
       await client.query(
-        `INSERT INTO quote_items (
-          quote_id, 
-          listing_id, 
-          listing_name, 
-          listing_location, 
-          bedrooms, 
-          bathrooms, 
-          price_usd, 
-          image_url, 
-          guesty_booking_domain
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        ON CONFLICT (quote_id, listing_id) DO NOTHING`,
-        [
-          quoteId,
-          item.id,
-          item.name || null,
-          item.location || null,
-          item.bedrooms ?? null,
-          item.bathrooms ?? null,
-          item.priceUSD ? Number(item.priceUSD) : null,
-          item.imageUrl || null,
-          item.guestyBookingDomain, // ✅ Guardando el dominio correcto
-        ],
+        `INSERT INTO quote_items (quote_id, listing_id, listing_name, listing_location, bedrooms, bathrooms, price_usd, image_url, guesty_booking_domain)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (quote_id, listing_id) DO NOTHING`,
+        [quoteId, item.id, item.name || null, item.location || null, item.bedrooms ?? null,
+         item.bathrooms ?? null, item.priceUSD ? Number(item.priceUSD) : null, item.imageUrl || null, item.guestyBookingDomain]
       );
     }
 
-    // 3) Registrar en el historial
     await client.query(
-      `INSERT INTO quote_history (
-        quote_id, 
-        event_type, 
-        actor_user_id, 
-        payload
-      ) VALUES ($1, 'CREATED', $2, $3)`,
-      [
-        quoteId,
-        req.user?.id || null,
-        JSON.stringify({
-          itemsCount: items.length,
-          guestFirstName,
-          guestLastName,
-          travelAdvisorEmail,
-          guestEmail,
-          checkIn,
-          checkOut,
-        }),
-      ],
+      `INSERT INTO quote_history (quote_id, event_type, actor_user_id, payload) VALUES ($1, 'CREATED', $2, $3)`,
+      [quoteId, req.user?.id || null, JSON.stringify({ itemsCount: items.length, guestFirstName, guestLastName, travelAdvisorEmail, guestEmail, checkIn, checkOut })]
     );
 
     await client.query("COMMIT");
-    console.log(
-      `✅ Transaction committed - Quote ${quoteId} con ${items.length} propiedades`,
-    );
-
-    res.status(201).json({
-      success: true,
-      quoteId,
-      message: `Quote creado con ${items.length} propiedades`,
-    });
+    return res.status(201).json({ success: true, quoteId, message: `Quote creado con ${items.length} propiedades` });
   } catch (error) {
     await client.query("ROLLBACK");
     console.error("❌ Error creando quote:", error);
-    console.error("Stack trace:", error.stack);
-
-    res.status(500).json({
-      error: "Error interno al crear el quote",
-      details:
-        process.env.NODE_ENV === "development" ? error.message : undefined,
-    });
+    return res.status(500).json({ error: "Error interno al crear el quote", details: process.env.NODE_ENV === "development" ? error.message : undefined });
   } finally {
     client.release();
   }
 }
 
-/**
- * GET /quotes/:id
- * Obtiene los detalles de un quote
- */
 export async function getQuoteDetails(req, res) {
   try {
     const { id } = req.params;
-
-    console.log(`📖 GET QUOTE - ID: ${id}`);
-
-    // 1) Obtener quote principal
     const quoteResult = await pool.query(
-      `SELECT 
-        q.*,
-        u.email as created_by_email,
-        u.full_name as created_by_name
-       FROM quotes q
-       LEFT JOIN users u ON q.created_by_user_id = u.id
-       WHERE q.id = $1`,
-      [id],
+      `SELECT q.*, u.email as created_by_email, u.full_name as created_by_name
+       FROM quotes q LEFT JOIN users u ON q.created_by_user_id = u.id WHERE q.id = $1`, [id]
     );
+    if (quoteResult.rows.length === 0) return res.status(404).json({ error: "Quote no encontrado" });
 
-    if (quoteResult.rows.length === 0) {
-      console.error(`❌ Quote ${id} no encontrado`);
-      return res.status(404).json({ error: "Quote no encontrado" });
-    }
+    const itemsResult   = await pool.query(`SELECT * FROM quote_items WHERE quote_id = $1 ORDER BY created_at`, [id]);
+    const historyResult = await pool.query(`SELECT * FROM quote_history WHERE quote_id = $1 ORDER BY created_at DESC`, [id]);
 
-    // 2) Obtener items del quote
-    const itemsResult = await pool.query(
-      `SELECT * FROM quote_items 
-       WHERE quote_id = $1 
-       ORDER BY created_at`,
-      [id],
-    );
-
-    console.log(
-      `✅ Quote ${id} encontrado con ${itemsResult.rows.length} items`,
-    );
-
-    // 🔍 LOG: Verificar dominios guardados en DB
-    console.log("🔍 ITEMS FROM DB - domain check:");
-    itemsResult.rows.forEach((item, idx) => {
-      console.log(
-        `  [${idx}] listing_id: ${item.listing_id}, guesty_booking_domain: "${item.guesty_booking_domain}"`,
-      );
-    });
-
-    // 3) Obtener historial
-    const historyResult = await pool.query(
-      `SELECT * FROM quote_history 
-       WHERE quote_id = $1 
-       ORDER BY created_at DESC`,
-      [id],
-    );
-
-    res.json({
-      quote: quoteResult.rows[0],
-      items: itemsResult.rows,
-      history: historyResult.rows,
-    });
+    return res.json({ quote: quoteResult.rows[0], items: itemsResult.rows, history: historyResult.rows });
   } catch (error) {
     console.error("❌ Error obteniendo quote:", error);
-    console.error("Stack trace:", error.stack);
-    res.status(500).json({ error: "Error interno" });
+    return res.status(500).json({ error: "Error interno" });
   }
 }
-/**
- * POST /quotes/:id/send
- * Envía el email al Travel Advisor (siempre) y opcionalmente al Guest
- * ACTUALIZADO: Maneja guestFirstName, guestLastName, travelAdvisorEmail, guestEmail
- */
+
 export async function sendQuoteEmail(req, res) {
   const client = await pool.connect();
-
   try {
     const { id } = req.params;
-    const {
-      guestFirstName,
-      guestLastName,
-      travelAdvisorEmail,
-      guestEmail,
-      checkIn,
-      checkOut,
-      guests,
-      items,
-    } = req.body;
+    const { guestFirstName, guestLastName, travelAdvisorEmail, guestEmail, checkIn, checkOut, guests, items } = req.body;
     const userId = req.user?.id;
 
-    console.log(`📧 SEND QUOTE EMAIL - Quote ID: ${id}`, {
-      guestFirstName,
-      guestLastName,
-      travelAdvisorEmail,
-      guestEmail,
-      checkIn,
-      checkOut,
-      guests,
-      itemsCount: items?.length,
-    });
-
-    // ===== VALIDACIONES DE CAMPOS REQUERIDOS =====
-    if (!guestFirstName?.trim()) {
-      return res.status(400).json({
-        ok: false,
-        error: "Guest first name is required",
-      });
-    }
-
-    if (!guestLastName?.trim()) {
-      return res.status(400).json({
-        ok: false,
-        error: "Guest last name is required",
-      });
-    }
-
-    if (!travelAdvisorEmail?.trim()) {
-      return res.status(400).json({
-        ok: false,
-        error: "Travel advisor email is required",
-      });
-    }
-
-    // Validación de formato de email
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(travelAdvisorEmail)) {
-      return res.status(400).json({
-        ok: false,
-        error: "Invalid travel advisor email format",
-      });
-    }
-
-    if (guestEmail && !emailRegex.test(guestEmail)) {
-      return res.status(400).json({
-        ok: false,
-        error: "Invalid guest email format",
-      });
-    }
-
-    if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({
-        ok: false,
-        error: "Items array is required and must contain at least one property",
-      });
-    }
+    if (!guestFirstName?.trim())      return res.status(400).json({ ok: false, error: "Guest first name is required" });
+    if (!guestLastName?.trim())       return res.status(400).json({ ok: false, error: "Guest last name is required" });
+    if (!travelAdvisorEmail?.trim())  return res.status(400).json({ ok: false, error: "Travel advisor email is required" });
+    if (!emailRegex.test(travelAdvisorEmail)) return res.status(400).json({ ok: false, error: "Invalid travel advisor email format" });
+    if (guestEmail && !emailRegex.test(guestEmail)) return res.status(400).json({ ok: false, error: "Invalid guest email format" });
+    if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ ok: false, error: "Items array is required" });
 
     await client.query("BEGIN");
 
-    // 1) Actualizar el quote con los nuevos datos
     const updateResult = await client.query(
-      `UPDATE quotes 
-       SET 
-         guest_first_name = $2,
-         guest_last_name = $3,
-         travel_advisor_email = $4,
-         guest_email = $5,
-         check_in = $6,
-         check_out = $7,
-         guests = $8,
-         updated_at = NOW()
-       WHERE id = $1 AND status = 'draft'
-       RETURNING *`,
-      [
-        id,
-        guestFirstName.trim(),
-        guestLastName.trim(),
-        travelAdvisorEmail.trim(),
-        guestEmail?.trim() || null,
-        checkIn || null,
-        checkOut || null,
-        guests || null,
-      ],
+      `UPDATE quotes SET guest_first_name=$2, guest_last_name=$3, travel_advisor_email=$4, guest_email=$5,
+       check_in=$6, check_out=$7, guests=$8, updated_at=NOW() WHERE id=$1 AND status='draft' RETURNING *`,
+      [id, guestFirstName.trim(), guestLastName.trim(), travelAdvisorEmail.trim(), guestEmail?.trim() || null,
+       checkIn || null, checkOut || null, guests || null]
     );
-
     if (updateResult.rows.length === 0) {
       await client.query("ROLLBACK");
-      return res.status(404).json({
-        ok: false,
-        error: "Quote no encontrado o ya enviado",
-      });
+      return res.status(404).json({ ok: false, error: "Quote no encontrado o ya enviado" });
     }
-
     const quote = updateResult.rows[0];
 
-    console.log("🔍 QUOTE ACTUALIZADO:", {
-      id: quote.id,
-      guest_first_name: quote.guest_first_name,
-      guest_last_name: quote.guest_last_name,
-      travel_advisor_email: quote.travel_advisor_email,
-      guest_email: quote.guest_email,
-      check_in: quote.check_in,
-      check_out: quote.check_out,
-    });
-
-    // 2) Obtener items (villas) del quote existente
     const itemsResult = await client.query(
-      `SELECT qi.*, COALESCE(l.villanet_commission_rate, 0) as commission_rate 
+      `SELECT qi.*, COALESCE(l.villanet_commission_rate, 0) as commission_rate,
+              pm.logo_url as pm_logo_url, pm.name as pm_name
        FROM quote_items qi
        LEFT JOIN listings l ON qi.listing_id = l.listing_id
-       WHERE qi.quote_id = $1`,
-      [id],
+       LEFT JOIN listing_property_managers pm ON l.listing_property_manager_id = pm.id
+       WHERE qi.quote_id = $1`, [id]
     );
-
     const dbItems = itemsResult.rows;
-
     if (dbItems.length === 0) {
       await client.query("ROLLBACK");
-      return res.status(400).json({
-        ok: false,
-        error: "El quote no tiene propiedades",
-      });
+      return res.status(400).json({ ok: false, error: "El quote no tiene propiedades" });
     }
 
-    // --- PREPARACIÓN DE DATOS ---
-    const checkInYmd = toYmd(quote.check_in);
+    const checkInYmd  = toYmd(quote.check_in);
     const checkOutYmd = toYmd(quote.check_out);
+    const hasDates    = checkInYmd && checkOutYmd;
+    const nights      = hasDates ? countStayNights(checkInYmd, checkOutYmd) : 1;
 
-    // Detectar si hay fechas válidas
-    const hasDates = checkInYmd && checkOutYmd;
-
-    // Si hay fechas, calculamos noches. Si no, ponemos 1 para efectos visuales de precio base.
-    const nights = hasDates ? countStayNights(checkInYmd, checkOutYmd) : 1;
-
-    console.log(
-      `📅 Datos: CheckIn=${checkInYmd}, CheckOut=${checkOutYmd}, Nights=${nights}, HasDates=${hasDates}`,
-    );
-
-    // 3) Procesamiento Paralelo
     const itemsWithFullData = await Promise.all(
       dbItems.map(async (item) => {
         let breakdown = null;
 
-        // Solo llamamos a Guesty si tenemos fechas
         if (hasDates) {
-          breakdown = await getGuestyBreakdown(
-            item.listing_id,
-            checkInYmd,
-            checkOutYmd,
-            quote.guests,
-            item.commission_rate,
-          );
+          breakdown = await getGuestyBreakdownWithFees(item.listing_id, checkInYmd, checkOutYmd, quote.guests);
+          if (!breakdown) {
+            console.warn(`⚠️ Booking Engine failed for ${item.listing_id}, falling back to Open API`);
+            breakdown = await getGuestyBreakdown(item.listing_id, checkInYmd, checkOutYmd, quote.guests, item.commission_rate);
+          }
         }
 
-        // Generar URL
         const guestyUrl = buildGuestyUrl({
           domainOrUrl: item.guesty_booking_domain || "https://book.guesty.com",
-          listingId: item.listing_id,
-          checkInYmd,
-          checkOutYmd,
-          guests: quote.guests,
+          listingId:   item.listing_id,
+          checkInYmd, checkOutYmd, guests: quote.guests,
         });
-
-        // Fallback si no hay breakdown
-        const finalBreakdown = breakdown || {
-          base: Number(item.price_usd) * nights,
-          taxes: 0,
-          cleaning: 0,
-          otherFees: 0,
-          commission: 0,
-          totalGross: Number(item.price_usd) * nights,
-          currency: "USD",
-          isEstimate: true,
-        };
 
         return {
           ...item,
           guestyUrl,
-          breakdown: finalBreakdown,
+          breakdown: breakdown || {
+            base: Number(item.price_usd) * nights, taxes: 0, cleaning: 0,
+            otherFees: 0, commission: 0, totalGross: Number(item.price_usd) * nights,
+            currency: "USD", isEstimate: true,
+          },
         };
-      }),
+      })
     );
 
-    // 4) Generar HTML para el Travel Advisor
-    const advisorEmailHtml = await generateQuoteEmailHtml(
-      {
-        ...quote,
-        recipient_type: "advisor", // Indicador para personalizar el template
-      },
-      itemsWithFullData,
-      nights,
-      checkInYmd,
-      checkOutYmd,
-    );
+    const pmLogoUrl = itemsWithFullData[0]?.pm_logo_url || null;
+    const pmName    = itemsWithFullData[0]?.pm_name || "villanet";
 
-    // 5) Enviar email al Travel Advisor (SIEMPRE)
-    console.log(
-      `📮 Enviando email al Travel Advisor: ${quote.travel_advisor_email}`,
+    const advisorHtml = await generateQuoteEmailHtml(
+      { ...quote, recipient_type: "advisor" }, itemsWithFullData, nights, checkInYmd, checkOutYmd, pmLogoUrl, pmName
     );
     await sendEmail({
       to: quote.travel_advisor_email,
       subject: `Your Quote for ${quote.guest_first_name} ${quote.guest_last_name}`,
-      html: advisorEmailHtml,
+      html: advisorHtml,
     });
 
-    // 6) Enviar email al Guest (SOLO si guestEmail existe)
     if (quote.guest_email?.trim()) {
-      console.log(`📮 Enviando email al Guest: ${quote.guest_email}`);
-
-      // Generar HTML para el Guest (puede ser diferente del advisor)
-      const guestEmailHtml = await generateQuoteEmailHtml(
-        {
-          ...quote,
-          recipient_type: "guest", // Indicador para personalizar el template
-        },
-        itemsWithFullData,
-        nights,
-        checkInYmd,
-        checkOutYmd,
+      const guestHtml = await generateQuoteEmailHtml(
+        { ...quote, recipient_type: "guest" }, itemsWithFullData, nights, checkInYmd, checkOutYmd, pmLogoUrl, pmName
       );
-
       await sendEmail({
         to: quote.guest_email,
-        subject: `Your Curated Villa Options - ${quote.guest_first_name} ${quote.guest_last_name}`,
-        html: guestEmailHtml,
+        subject: `Your Curated Villa Options — ${quote.guest_first_name} ${quote.guest_last_name}`,
+        html: guestHtml,
       });
-    } else {
-      console.log(`ℹ️  No se enviará email al guest (no proporcionado)`);
     }
 
-    // 7) Actualizar status del quote
+    await client.query(`UPDATE quotes SET status='sent', updated_at=NOW() WHERE id=$1`, [id]);
     await client.query(
-      `UPDATE quotes SET status = 'sent', updated_at = NOW() WHERE id = $1`,
-      [id],
+      `INSERT INTO quote_history (quote_id, event_type, actor_user_id, payload) VALUES ($1, 'SENT', $2, $3)`,
+      [id, userId || null, JSON.stringify({
+        guestFirstName: quote.guest_first_name, guestLastName: quote.guest_last_name,
+        travelAdvisorEmail: quote.travel_advisor_email, guestEmailSent: !!quote.guest_email,
+        checkIn: checkInYmd, checkOut: checkOutYmd, guests: quote.guests, itemsCount: itemsWithFullData.length,
+      })]
     );
 
-    // 8) Registrar en historial
-    await client.query(
-      `INSERT INTO quote_history (
-        quote_id, 
-        event_type, 
-        actor_user_id, 
-        payload
-      ) VALUES ($1, 'SENT', $2, $3)`,
-      [
-        id,
-        userId || null,
-        JSON.stringify({
-          guestFirstName: quote.guest_first_name,
-          guestLastName: quote.guest_last_name,
-          travelAdvisorEmail: quote.travel_advisor_email,
-          guestEmailSent: !!quote.guest_email,
-          checkIn: checkInYmd,
-          checkOut: checkOutYmd,
-          guests: quote.guests,
-          itemsCount: itemsWithFullData.length,
-        }),
-      ],
-    );
-
-    // 9) Notificar Discord
-    const totalQuoteAmount = itemsWithFullData.reduce(
-      (sum, i) => sum + (i.breakdown?.totalGross || 0),
-      0,
-    );
-
+    const totalQuoteAmount = itemsWithFullData.reduce((s, i) => s + (i.breakdown?.totalGross || 0), 0);
     notifySafely(() =>
       sendQuoteNotification({
-        quoteId: id,
-        guestName: `${quote.guest_first_name} ${quote.guest_last_name}`,
-        advisorEmail: quote.travel_advisor_email,
-        guestEmail: quote.guest_email || "Not provided",
-        villas: itemsWithFullData.map((i) => ({
-          name: i.listing_name,
-          price: i.breakdown.totalGross,
-        })),
-        checkIn: checkInYmd,
-        checkOut: checkOutYmd,
-        guests: quote.guests,
-        totalPrice: totalQuoteAmount,
-        downloadUrl: itemsWithFullData[0]?.guestyUrl,
-      }),
+        quoteId: id, guestName: `${quote.guest_first_name} ${quote.guest_last_name}`,
+        advisorEmail: quote.travel_advisor_email, guestEmail: quote.guest_email || "Not provided",
+        villas: itemsWithFullData.map((i) => ({ name: i.listing_name, price: i.breakdown.totalGross })),
+        checkIn: checkInYmd, checkOut: checkOutYmd, guests: quote.guests,
+        totalPrice: totalQuoteAmount, downloadUrl: itemsWithFullData[0]?.guestyUrl,
+      })
     );
 
     await client.query("COMMIT");
-    console.log(`✅ Email(s) enviado(s) correctamente para Quote ${id}`);
-
     return res.json({
       success: true,
       message: guestEmail
-        ? `Emails enviados a ${quote.travel_advisor_email} y ${quote.guest_email}`
-        : `Email enviado a ${quote.travel_advisor_email}`,
+        ? `Emails sent to ${quote.travel_advisor_email} and ${quote.guest_email}`
+        : `Email sent to ${quote.travel_advisor_email}`,
       quoteId: id,
-      emailsSent: {
-        advisor: quote.travel_advisor_email,
-        guest: quote.guest_email || null,
-      },
+      emailsSent: { advisor: quote.travel_advisor_email, guest: quote.guest_email || null },
     });
   } catch (error) {
     await client.query("ROLLBACK");
     console.error("❌ Error enviando email de quote:", error);
-    console.error("Stack trace:", error.stack);
-
-    return res.status(500).json({
-      ok: false,
-      error: "Error interno al enviar el email",
-      details:
-        process.env.NODE_ENV === "development" ? error.message : undefined,
-    });
+    return res.status(500).json({ ok: false, error: "Error interno al enviar el email",
+      details: process.env.NODE_ENV === "development" ? error.message : undefined });
   } finally {
     client.release();
   }
 }
 
-/**
- * Genera el HTML del email
- */
-export async function generateQuoteEmailHtml(
-  quote,
-  items,
-  nights,
-  checkInYmd,
-  checkOutYmd,
-) {
+// ─── Email template ───────────────────────────────────────────────────────────
+
+export async function generateQuoteEmailHtml(quote, items, nights, checkInYmd, checkOutYmd, pmLogoUrl = null, pmName = "villanet") {
   const formatDate = (dateStr) => {
     if (!dateStr) return "Flexible Dates";
-    const d = new Date(dateStr + "T12:00:00");
-    return d.toLocaleDateString("en-US", {
-      weekday: "long",
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-      timeZone: "UTC",
+    return new Date(dateStr + "T12:00:00").toLocaleDateString("en-US", {
+      weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "UTC",
     });
   };
 
-  const formatCurrency = (amount) => {
+  const fmt = (amount) => {
     if (!amount) return "Contact for pricing";
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-      minimumFractionDigits: 0,
-    }).format(amount || 0);
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0 }).format(amount);
   };
 
-  const safeNights = nights || 1;
+  const safeNights  = nights || 1;
+  const isGuest     = quote.recipient_type === "guest";
+  const greeting    = isGuest ? `Hello, ${quote.guest_first_name}` : `Hello, Travel Advisor`;
+  const intro       = isGuest
+    ? `Here are your curated villa options, handpicked based on your preferences.`
+    : `Here is the quote prepared for your client, <strong>${quote.guest_first_name} ${quote.guest_last_name}</strong>.`;
 
-  // Detectar tipo de recipient
-  const isAdvisor = quote.recipient_type === "advisor";
-  const isGuest = quote.recipient_type === "guest";
+  // PNG icons — email-safe (no SVG)
+  const iconPin  = `<img src="https://img.icons8.com/?size=100&id=3723&format=png&color=71717a"   width="13" height="13" style="vertical-align:middle;margin-right:5px;" alt="">`;
+  const iconBed  = `<img src="https://img.icons8.com/?size=100&id=7546&format=png&color=71717a"   width="13" height="13" style="vertical-align:middle;margin-right:5px;" alt="">`;
+  const iconBath = `<img src="https://img.icons8.com/?size=100&id=11485&format=png&color=71717a"  width="13" height="13" style="vertical-align:middle;margin-right:5px;" alt="">`;
+  const iconCal  = `<img src="https://img.icons8.com/?size=100&id=23&format=png&color=71717a"     width="13" height="13" style="vertical-align:middle;margin-right:5px;" alt="">`;
+  const iconNight= `<img src="https://img.icons8.com/?size=100&id=660&format=png&color=71717a"    width="13" height="13" style="vertical-align:middle;margin-right:5px;" alt="">`;
+  const iconGuest= `<img src="https://img.icons8.com/?size=100&id=fEZo4zNy3Mqa&format=png&color=71717a" width="13" height="13" style="vertical-align:middle;margin-right:5px;" alt="">`;
 
-  // Personalizar saludo
-  const greeting = isGuest
-    ? `Dear ${quote.guest_first_name}`
-    : `Dear Travel Advisor`;
+  const logo = pmLogoUrl
+    ? `<img src="${pmLogoUrl}" alt="${pmName}" style="max-height:44px;max-width:180px;object-fit:contain;">`
+    : `<span style="font-family:Inter,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#09090b;">VILLANET</span>`;
 
-  // Personalizar mensaje
-  const introMessage = isGuest
-    ? `Based on your preferences, here are the curated villa options selected for you:`
-    : `Based on your preferences, here is the quote for your client ${quote.guest_first_name} ${quote.guest_last_name}`;
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <!--[if mso]><noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript><![endif]-->
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+    *{margin:0;padding:0;box-sizing:border-box;}
+    body{font-family:Inter,Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#09090b;background:#f4f4f5;}
+    .wrap{max-width:600px;margin:0 auto;}
+    /* header */
+    .hd{background:#fff;padding:36px 40px 28px;text-align:center;border-bottom:1px solid #e5e7eb;}
+    .hd-label{font-size:11px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#71717a;margin-bottom:20px;}
+    .hd h1{font-size:26px;font-weight:600;color:#09090b;line-height:1.2;margin:16px 0 10px;}
+    .hd p{font-size:14px;color:#52525b;line-height:1.6;}
+    /* trip info bar */
+    .trip{background:#fff;margin:0;padding:20px 40px;border-bottom:1px solid #e5e7eb;}
+    .trip-grid{display:table;width:100%;border-collapse:collapse;}
+    .trip-cell{display:table-cell;width:25%;padding:10px 12px;vertical-align:middle;font-size:13px;}
+    .trip-cell + .trip-cell{border-left:1px solid #e5e7eb;}
+    .trip-cell .tc-label{font-size:11px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:#71717a;margin-bottom:3px;}
+    .trip-cell .tc-val{font-weight:600;color:#09090b;font-size:13px;}
+    /* cards */
+    .content{padding:24px 40px 32px;}
+    .card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;margin-bottom:20px;}
+    .card-img{width:100%;height:220px;object-fit:cover;display:block;}
+    .card-body{padding:22px 24px 24px;}
+    .card-title{font-size:18px;font-weight:600;color:#09090b;margin-bottom:12px;line-height:1.3;}
+    .card-meta{margin-bottom:16px;}
+    .card-meta p{font-size:13px;color:#71717a;margin-bottom:5px;line-height:1.4;}
+    /* breakdown */
+    .bd{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:16px 18px;margin-bottom:18px;}
+    .bd-row{display:table;width:100%;padding:6px 0;}
+    .bd-row+.bd-row{border-top:1px solid #f0f0f0;}
+    .bd-label{display:table-cell;font-size:13px;color:#52525b;vertical-align:middle;}
+    .bd-val{display:table-cell;font-size:13px;font-weight:600;color:#09090b;text-align:right;vertical-align:middle;}
+    .bd-total .bd-label{font-weight:600;color:#09090b;font-size:14px;padding-top:10px;}
+    .bd-total .bd-val{font-size:16px;font-weight:700;color:#09090b;padding-top:10px;}
+    .bd-total{border-top:2px solid #e5e7eb !important;margin-top:4px;}
+    .disclaimer{font-size:11px;color:#a1a1aa;margin-top:10px;line-height:1.5;padding:0 2px;}
+    /* CTA button */
+    .btn-wrap{text-align:center;}
+    .btn{display:inline-block;background:#09090b;color:#ffffff !important;text-decoration:none;
+         font-size:13px;font-weight:600;letter-spacing:0.02em;padding:13px 28px;
+         border-radius:8px;width:100%;text-align:center;}
+    /* footer */
+    .ft{background:#fafafa;padding:28px 40px;text-align:center;border-top:1px solid #e5e7eb;}
+    .ft p{font-size:12px;color:#71717a;margin:4px 0;line-height:1.6;}
+    @media(max-width:600px){
+      .hd,.trip,.content,.ft{padding-left:20px;padding-right:20px;}
+      .trip-cell{display:block;width:100%;border-left:none !important;border-bottom:1px solid #e5e7eb;padding:8px 0;}
+      .card-img{height:180px;}
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
 
-  const mapPin = `<img src="https://img.icons8.com/?size=100&id=3723&format=png&color=697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Loc">`;
-  const guestIcon = `<img src="https://img.icons8.com/?size=100&id=fEZo4zNy3Mqa&format=png&color=697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Gst">`;
-  const bedIcon = `<img src="https://img.icons8.com/?size=100&id=7546&format=png&color=697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Bed">`;
-  const bathIcon = `<img src="https://img.icons8.com/?size=100&id=11485&format=png&color=#697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Bath">`;
-  const calendarIcon = `<img src="https://img.icons8.com/?size=100&id=23&format=png&color=697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Cal">`;
-  const nightsIcon = `<img src="https://img.icons8.com/?size=100&id=660&format=png&color=697686" width="14" height="14" style="vertical-align:middle; margin-right:4px;" alt="Ngt">`;
+  <!-- Header -->
+  <div class="hd">
+    <div class="hd-label">${logo}</div>
+    <h1>Your Curated Villa Options</h1>
+    <p>${greeting}! ${intro}</p>
+  </div>
 
-  return `
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      body { 
-        font-family: Inter;
-        line-height: 1.6; 
-        color: #09090b;
-        background: #f9fafb;
-      }
-      .container { 
-        max-width: 600px; 
-        margin: 0 auto; 
-        background: #ffffff;
-      }
-      .header { 
-        background: #ffffff;
-        padding: 48px 32px 32px;
-        text-align: center;
-        border-bottom: 1px solid #e5e5e5;
-      }
-      .header-label {
-        font-size: 11px;
-        font-weight: 500;
-        letter-spacing: 0.125em;
-        text-transform: uppercase;
-        color: #71717a;
-        margin-bottom: 16px;
-      }
-      .header h1 { 
-        font-size: 32px;
-        font-weight: 600;
-        line-height: 1.1;
-        color: #09090b;
-        margin-bottom: 12px;
-      }
-      .header p {
-        font-size: 16px;
-        color: #71717a;
-        line-height: 1.6;
-      }
-      .content { 
-        padding: 32px;
-        background: #ffffff;
-      }
-      .date-info {
-        background: #f4f4f5;
-        padding: 20px;
-        border-radius: 8px;
-        margin-bottom: 32px;
-        border-left: 3px solid #09090b;
-      }
-      .date-info p {
-        font-size: 14px;
-        color: #09090b;
-        margin: 4px 0;
-      }
-      .date-info strong {
-        font-weight: 600;
-      }
-      .property-card { 
-        background: #ffffff;
-        margin: 24px 0;
-        border: 1px solid #e5e5e5;
-        border-radius: 8px;
-        overflow: hidden;
-        transition: box-shadow 0.2s;
-      }
-      .property-image { 
-        width: 100%; 
-        height: 240px; 
-        object-fit: cover;
-        display: block;
-      }
-      .property-content {
-        padding: 24px;
-      }
-      .property-content h3 {
-        font-size: 20px;
-        font-weight: 600;
-        color: #09090b;
-        margin-bottom: 16px;
-        line-height: 1.2;
-      }
-      .breakdown-container{
-        background:#f9fafb;
-        padding:15px;
-         border-radius:8px;
-      }
-      .breakdown-row { 
-        margin-bottom: 12px; 
-        font-size: 14px; 
-      }
-      .breakdown-label { 
-        display: block; 
-        color: #666; 
-        margin-bottom: 2px;
-      }
-      .breakdown-value { 
-        display: block; 
-        font-weight: bold; 
-        font-size: 15px;
-      }
-      
-      .btn { 
-        display: inline-block;
-        width: 100%;
-        background: #000;
-        color: #ffffff !important;
-        padding: 14px 24px;
-        text-decoration: none;
-        border-radius: 6px;
-        font-weight: bold;
-        font-size: 13px;
-        text-align: center;
-        transition: background 0.2s;
-      }
-      
-      .footer { 
-        background: #fafafa;
-        padding: 32px;
-        text-align: center;
-        border-top: 1px solid #e5e5e5;
-      }
-      .footer p {
-        font-size: 13px;
-        color: #71717a;
-        margin: 8px 0;
-        line-height: 1.5;
-      }
-
-      .villanet-badge {
-        display: inline-block;
-        color: #111111;           
-        padding: 2px 8px;
-        border-radius: 12px;
-        font-size: 11px;
-        font-weight: bold;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-      }      
-
-      @media only screen and (max-width: 600px) {
-        .header { padding: 32px 20px 24px; }
-        .content { padding: 20px; }
-        .header h1 { font-size: 26px; }
-        .property-content { padding: 20px; }
-      }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <div class="header">
-        <div>
-          <h2 class="villanet-badge">villanet</h2>
-        </div>
-        <h1>Your Curated Villa Options with VillaNet</h1>
-        <p>Hello ${greeting}!</p>
-        <p>${introMessage}</p>
-
+  <!-- Trip summary bar -->
+  <div class="trip">
+    <div class="trip-grid">
+      <div class="trip-cell">
+        <div class="tc-label">${iconCal} Check-in</div>
+        <div class="tc-val">${formatDate(checkInYmd)}</div>
       </div>
-      
-      <div class="content">
-        <div class="date-info">
-          <p><strong>${calendarIcon} Check-in:</strong> ${formatDate(checkInYmd)}</p>
-          <p><strong>${calendarIcon} Check-out:</strong> ${formatDate(checkOutYmd)}</p>
-          <p><strong>${nightsIcon} Nights:</strong> ${safeNights}</p>
-          ${quote.guests ? `<p><strong>${guestIcon} Guests:</strong> ${quote.guests || 1}</p>` : ""}
+      <div class="trip-cell">
+        <div class="tc-label">${iconCal} Check-out</div>
+        <div class="tc-val">${formatDate(checkOutYmd)}</div>
+      </div>
+      <div class="trip-cell">
+        <div class="tc-label">${iconNight} Nights</div>
+        <div class="tc-val">${safeNights}</div>
+      </div>
+      ${quote.guests ? `<div class="trip-cell"><div class="tc-label">${iconGuest} Guests</div><div class="tc-val">${quote.guests}</div></div>` : ""}
+    </div>
+  </div>
+
+  <!-- Villa cards -->
+  <div class="content">
+    ${items.map((item) => {
+      const b = item.breakdown;
+      if (!b) return "";
+
+      const feeRows = (() => {
+        if (b.feeBreakdown?.length > 0) {
+          return b.feeBreakdown.filter(f => f.amount > 0).map(f => `
+            <div class="bd-row">
+              <span class="bd-label">${f.title}</span>
+              <span class="bd-val">${fmt(f.amount)}</span>
+            </div>`).join("");
+        }
+        if (b.otherFees > 0) {
+          return `<div class="bd-row"><span class="bd-label">Other Fees</span><span class="bd-val">${fmt(b.otherFees)}</span></div>`;
+        }
+        return "";
+      })();
+
+      return `
+    <div class="card">
+      ${item.image_url ? `<img src="${item.image_url}" class="card-img" alt="${item.listing_name || "Villa"}">` : ""}
+      <div class="card-body">
+        <div class="card-title">${item.listing_name || "Luxury Villa"}</div>
+        <div class="card-meta">
+          <p>${iconPin}${item.listing_location || ""}</p>
+          <p>${iconBed}${item.bedrooms} Bedrooms &nbsp;·&nbsp; ${iconBath}${item.bathrooms} Bathrooms</p>
         </div>
-  
-        ${items
-          .map((item) => {
-            const b = item.breakdown;
-            if (!b) return ""; // O manejar error de villa no disponible
 
-            return `
-          <div class="property-card">
-            ${item.image_url ? `<img src="${item.image_url}" class="property-image">` : ""}
-            <div class="property-content">
-              <h3>${item.listing_name || "Luxury Villa"}</h3>
-              <p style="font-size:14px; color:#71717a; margin-bottom:12px;">${mapPin} ${item.listing_location}</p>
-              <p style="font-size:14px; color:#71717a; margin-bottom:12px;">${bedIcon} ${item.bedrooms} Bedrooms</p>
-              <p style="font-size:14px; color:#71717a; margin-bottom:12px;">${bathIcon} ${item.bathrooms} Bathrooms</p>
-
-              <div class="breakdown-container">
-                <div class="breakdown-row">
-                  <div class="breakdown-label">
-                    Base Rate (${safeNights} nights)
-                  </div>
-                  <span class="breakdown-value">${formatCurrency(b.base, b.currency)}</span>
-                </div>
-                
-                ${
-                  b.cleaning > 0
-                    ? `
-                <div class="breakdown-row">
-                  <div class="breakdown-label">
-                    Cleaning Fee
-                  </div>
-                  <span class="breakdown-value">${formatCurrency(b.cleaning, b.currency)}</span>
-                </div>`
-                    : ""
-                }
-
-                ${
-                  b.taxes > 0
-                    ? `
-                <div class="breakdown-row">
-                  <div class="breakdown-label">
-                    Taxes
-                  </div>
-                  <span class="breakdown-value">${formatCurrency(b.taxes, b.currency)}</span>
-                </div>`
-                    : ""
-                }
-
-                ${
-                  b.otherFees > 0
-                    ? `
-              <div class="breakdown-row">
-                <span class="breakdown-label">Resort / Other Fees</span>
-                <span class="breakdown-amount">${formatCurrency(b.otherFees)}</span>
-              </div>`
-                    : ""
-                }
-
-              ${
-                b.commission > 0
-                  ? `
-              <div class="breakdown-row">
-                <span class="breakdown-label">Service Fee</span>
-                <span class="breakdown-value">${formatCurrency(b.commission)}</span>
-              </div>`
-                  : ""
-              }
-
-               <div class="breakdown-row">
-                  <div class="breakdown-label">
-                     Total Quote
-                  </div>
-                  <span class="breakdown-value">${formatCurrency(b.totalGross, b.currency)}</span>
-                </div>
-              </div>
-  
-              <div style="margin-top:20px;">
-                <a href="${item.guestyUrl}" class="btn">View Availability & Book →</a>
-              </div>
-            </div>
+        <div class="bd">
+          <div class="bd-row">
+            <span class="bd-label">Base Rate (${safeNights} night${safeNights !== 1 ? "s" : ""})</span>
+            <span class="bd-val">${fmt(b.base)}</span>
           </div>
-        `;
-          })
-          .join("")}
-        
-        <div class="footer">
-          <p>Book with Confidence. Earn with Trust.</p>
-          <p>This quote was generated by VillaNet — connecting you with the world’s most vetted villas.</p>
-          <p>Questions? Contact your travel advisor directly.</p>
+          ${b.cleaning > 0 ? `<div class="bd-row"><span class="bd-label">Cleaning Fee</span><span class="bd-val">${fmt(b.cleaning)}</span></div>` : ""}
+          ${b.taxes    > 0 ? `<div class="bd-row"><span class="bd-label">Taxes</span><span class="bd-val">${fmt(b.taxes)}</span></div>` : ""}
+          ${feeRows}
+          ${b.commission > 0 ? `<div class="bd-row"><span class="bd-label">Service Fee</span><span class="bd-val">${fmt(b.commission)}</span></div>` : ""}
+          <div class="bd-row bd-total">
+            <span class="bd-label">Total</span>
+            <span class="bd-val">${fmt(b.totalGross)}</span>
+          </div>
         </div>
-        <div style="display:none; white-space:nowrap; font:15px courier; line-height:0;">
-          ${crypto.randomBytes(8).toString("hex")}
+
+        ${b.priceSource === "be_base_only" ? `<p class="disclaimer">* Estimate based on base rate + taxes. Additional platform fees may apply at checkout — click below to see the final price.</p>` : ""}
+
+        <div class="btn-wrap">
+          <a href="${item.guestyUrl}" class="btn">View Availability &amp; Book &rarr;</a>
         </div>
       </div>
-    </body>
-  </html>
-  `;
+    </div>`;
+    }).join("")}
+  </div>
+
+  <!-- Footer -->
+  <div class="ft">
+    <p>Book with Confidence. Earn with Trust.</p>
+    <p>This quote was generated by VillaNet — connecting you with the world's most vetted villas.</p>
+    ${!isGuest ? `<p>Questions? Reply to this email or contact your client directly.</p>` : `<p>Questions? Contact your travel advisor directly.</p>`}
+  </div>
+
+</div>
+<!-- anti-preheader filler -->
+<div style="display:none;max-height:0;overflow:hidden;">${crypto.randomBytes(8).toString("hex")}</div>
+</body>
+</html>`;
 }
+
+// ─── Additional controllers ───────────────────────────────────────────────────
 
 export async function checkQuotesAvailability(req, res) {
   try {
     const { checkIn, checkOut, guests, items } = req.body || {};
-
-    if (!checkIn || !checkOut) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "checkIn y checkOut son requeridos" });
-    }
-    if (!Array.isArray(items) || items.length === 0) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "items es requerido (array)" });
-    }
+    if (!checkIn || !checkOut) return res.status(400).json({ ok: false, error: "checkIn y checkOut son requeridos" });
+    if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ ok: false, error: "items es requerido (array)" });
 
     const results = await checkGuestyAvailabilityBatch({
-      checkIn,
-      checkOut,
-      guests: guests || null,
-      items: items.map((it) => ({
-        id: String(it.id),
-        guestyBookingDomain: it.guestyBookingDomain || null,
-      })),
+      checkIn, checkOut, guests: guests || null,
+      items: items.map((it) => ({ id: String(it.id), guestyBookingDomain: it.guestyBookingDomain || null })),
     });
-
     return res.json({ ok: true, results });
   } catch (e) {
     console.error("❌ availability-check error:", e);
-    return res
-      .status(500)
-      .json({ ok: false, error: "Error interno", details: e.message });
+    return res.status(500).json({ ok: false, error: "Error interno", details: e.message });
   }
 }
 
-// --- helpers ---
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 function clampPct(x, min = 0, max = 100) {
   const n = Number(x);
-  if (!Number.isFinite(n)) return min;
-  return Math.min(max, Math.max(min, n));
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : min;
 }
 
-function isYmd(s) {
-  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
-}
+function isYmd(s) { return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s); }
 
-// ✅ NUEVO: Helper para redondeo a 2 decimales
 function money2(n) {
   const x = Number(n);
-  if (!Number.isFinite(x)) return 0;
-  return Math.round(x * 100) / 100;
+  return Number.isFinite(x) ? Math.round(x * 100) / 100 : 0;
 }
 
 function sumByPred(items, pred) {
   if (!Array.isArray(items)) return 0;
   let total = 0;
   for (const it of items) {
-    if (!it) continue;
-    if (!pred(it)) continue;
-
-    const amt =
-      Number(it.amount) ??
-      Number(it.total) ??
-      Number(it.value) ??
-      Number(it.price) ??
-      Number(it.netAmount) ??
-      Number(it.grossAmount) ??
-      Number(it.gross);
-
+    if (!it || !pred(it)) continue;
+    const amt = Number(it.amount ?? it.total ?? it.value ?? it.price ?? it.netAmount ?? it.grossAmount ?? it.gross);
     if (Number.isFinite(amt)) total += amt;
   }
   return total;
 }
 
-/**
- * Parser definitivo - ajustado a la estructura REAL de tu response
- */
+function safeJson(x) { try { return JSON.stringify(x, null, 2); } catch { return String(x); } }
+
+
+// ─── Guesty quote parsers ────────────────────────────────────────────────────
+
+
 function parseGuestyQuote(raw) {
   const q = raw?.data ?? raw ?? {};
 
@@ -1234,21 +599,6 @@ function parseGuestyQuote(raw) {
     q?.price?.invoiceItems ||
     q?.priceBreakdown?.invoiceItems ||
     [];
-
-  // Debug si no encuentra
-  if (invoiceItems.length === 0) {
-    console.log(
-      "[parseGuestyQuote] NO ENCONTRÓ invoiceItems. Rutas chequeadas:",
-      {
-        doubleMoney: !!q?.rates?.ratePlans?.[0]?.money?.money?.invoiceItems,
-        ratePlansMoney: !!q?.rates?.ratePlans?.[0]?.money?.invoiceItems,
-        ratePlans: !!q?.rates?.ratePlans?.[0]?.invoiceItems,
-        money: !!q?.money?.invoiceItems,
-        root: !!q?.invoiceItems,
-        fullKeys: Object.keys(q),
-      },
-    );
-  }
 
   // Base: accommodation fare / AF
   const base = sumByPred(invoiceItems, (it) => {
@@ -1293,36 +643,10 @@ function parseGuestyQuote(raw) {
     q?.currency ||
     "USD";
 
-  // Log detallado con cada item
-  console.log("[parseGuestyQuote] Detected:", {
-    invoiceItemsCount: invoiceItems.length,
-    base,
-    cleaning,
-    taxes,
-    otherFees,
-    currency,
-    itemsFound: invoiceItems.map((it) => ({
-      title: it.title || it.name || "sin título",
-      amount: it.amount,
-      type: it.type || it.normalType || "sin tipo",
-      isTax: it.isTax,
-      normalType: it.normalType,
-    })),
-  });
-
   return { currency, base, cleaning, taxes, otherFees, invoiceItems };
 }
 
-// helper sin truncado
-function safeJson(x) {
-  try {
-    return JSON.stringify(x, null, 2);
-  } catch {
-    return String(x);
-  }
-}
 
-// --- controller ---
 export async function calculateQuote(req, res) {
   const requestId = `qcalc_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
 
@@ -1387,13 +711,6 @@ export async function calculateQuote(req, res) {
       ignoreBlocks: false,
     };
 
-    // 🚨 AQUÍ VA EL LOG QUE PIDES - justo antes del POST
-    console.log("🚨 payload -> Guesty", payload, {
-      guestsCountType: typeof payload.guestsCount,
-      guestsCountValue: payload.guestsCount,
-      isInt: Number.isInteger(payload.guestsCount),
-    });
-
     console.log(
       `➡️ [${requestId}] Guesty Open API POST /v1/quotes payload`,
       payload,
@@ -1414,7 +731,6 @@ export async function calculateQuote(req, res) {
         const payload2 = { ...payload };
         delete payload2.guestsCount;
         payload2.guests = guestsCount;
-        console.log(`🔁 [${requestId}] Retry with guests`, payload2);
         try {
           guestyResp = await guesty.post("/v1/quotes", payload2);
         } catch (e2) {
@@ -1427,12 +743,6 @@ export async function calculateQuote(req, res) {
         throw e;
       }
     }
-
-    console.log(`✅ [${requestId}] Guesty response`, {
-      status: guestyResp?.status,
-      topKeys: guestyResp?.data ? Object.keys(guestyResp.data) : [],
-      dataPreview: safeJson(guestyResp?.data),
-    });
 
     const parsed = parseGuestyQuote(guestyResp?.data);
 
@@ -1496,54 +806,228 @@ export async function calculateQuote(req, res) {
   }
 }
 
-// Función auxiliar para obtener el desglose real de Guesty
-async function getGuestyBreakdown(
-  listingId,
-  checkIn,
-  checkOut,
-  guests,
-  commissionPct,
-) {
+/**
+ * Helper para parsear invoice items de Guesty
+ * Separa en: base, cleaning, taxes, y otros fees
+ */
+
+function parseInvoiceItems(invoiceItems) {
+  if (!Array.isArray(invoiceItems) || invoiceItems.length === 0) {
+    return {
+      base: 0,
+      cleaning: 0,
+      taxes: 0,
+      otherFees: 0,
+      feeBreakdown: [],
+      currency: "USD",
+    };
+  }
+
+  // Base (Accommodation Fare)
+  const base = sumByPred(invoiceItems, (it) => {
+    const type = String(it.type || it.normalType || "").toUpperCase();
+    return (
+      type.includes("ACCOMMODATION") ||
+      type === "AF" ||
+      type === "ACCOMMODATION_FARE"
+    );
+  });
+
+  // Cleaning Fee
+  const cleaning = sumByPred(invoiceItems, (it) => {
+    const type = String(
+      it.type || it.normalType || it.title || "",
+    ).toLowerCase();
+    return type.includes("clean") || it.normalType === "CF";
+  });
+
+  // Taxes
+  const taxes = sumByPred(invoiceItems, (it) => {
+    const type = String(it.type || it.normalType || "").toUpperCase();
+    return (
+      type.includes("TAX") ||
+      it.isTax === true ||
+      type === "LT" ||
+      type === "TAX"
+    );
+  });
+
+  // Otros Fees (TODO lo que no sea base, cleaning o tax)
+  const otherFees = sumByPred(invoiceItems, (it) => {
+    const type = String(it.type || it.normalType || "").toUpperCase();
+
+    // Excluir base, cleaning y taxes
+    const isBase =
+      type.includes("ACCOMMODATION") ||
+      type === "AF" ||
+      type === "ACCOMMODATION_FARE";
+    const isCleaning = type.includes("CLEAN") || type === "CF";
+    const isTax =
+      type.includes("TAX") ||
+      it.isTax === true ||
+      type === "LT" ||
+      type === "TAX";
+
+    return !isBase && !isCleaning && !isTax;
+  });
+
+  // Desglose individual de cada fee
+  const feeBreakdown = invoiceItems
+    .filter((it) => {
+      const type = String(it.type || it.normalType || "").toUpperCase();
+      const isBase =
+        type.includes("ACCOMMODATION") ||
+        type === "AF" ||
+        type === "ACCOMMODATION_FARE";
+      const isCleaning = type.includes("CLEAN") || type === "CF";
+      const isTax =
+        type.includes("TAX") ||
+        it.isTax === true ||
+        type === "LT" ||
+        type === "TAX";
+      return !isBase && !isCleaning && !isTax;
+    })
+    .map((it) => ({
+      title: it.title || it.name || "Fee",
+      amount: Number(it.amount) || 0,
+      type: it.type || it.normalType || "FEE",
+    }));
+
+  const currency = invoiceItems[0]?.currency || "USD";
+
+  return { base, cleaning, taxes, otherFees, feeBreakdown, currency };
+}
+
+
+async function getGuestyBreakdownWithFees(listingId, checkIn, checkOut, guests) {
+  let base = 0, cleaning = 0, taxes = 0, currency = "USD";
+  let otherFees = 0, feeBreakdown = [], totalGross = 0, priceSource = "be_base_only";
+
   try {
-    // Reutilizamos el endpoint de tu calculadora
+    const beResponse = await getBookingEngineQuote(listingId, checkIn, checkOut, guests);
+    const moneyObj   = beResponse?.rates?.ratePlans?.[0]?.ratePlan?.money;
+    if (!moneyObj) return null;
+
+    base       = Number(moneyObj.fareAccommodation || 0);
+    cleaning   = Number(moneyObj.fareCleaning      || 0);
+    taxes      = Number(moneyObj.totalTaxes        || 0);
+    currency   = moneyObj.currency || "USD";
+    totalGross = base + cleaning + taxes;
+
+    // Additional fees from DB listing_fees table (populated manually per property).
+    // If table doesn't exist yet, falls back silently to base-only pricing with disclaimer.
+    try {
+      const nights     = countStayNights(checkIn, checkOut);
+      const guestCount = Number(guests) || 1;
+
+      const feesResult = await pool.query(
+        `SELECT fee_name, amount, unit, is_percentage
+         FROM listing_fees WHERE listing_id = $1 AND active = true
+         ORDER BY display_order, fee_name`,
+        [listingId]
+      );
+
+      if (feesResult.rows.length > 0) {
+        const computed = feesResult.rows.map((f) => {
+          const amt  = Number(f.amount);
+          const unit = String(f.unit || "per_stay").toLowerCase();
+          let   calc = f.is_percentage
+            ? Math.round(base * amt) / 100
+            : unit === "per_night"      ? amt * nights
+            : unit === "per_guest"      ? amt * guestCount
+            : unit === "per_guest_night"? amt * guestCount * nights
+            : amt;
+          return { title: f.fee_name, amount: Math.round(calc * 100) / 100, type: "FEE" };
+        }).filter((f) => f.amount > 0);
+
+        if (computed.length > 0) {
+          otherFees    = Math.round(computed.reduce((s, f) => s + f.amount, 0) * 100) / 100;
+          totalGross   = Math.round((base + cleaning + taxes + otherFees) * 100) / 100;
+          feeBreakdown = computed;
+          priceSource  = "db_fees";
+        }
+      }
+    } catch (dbErr) {
+      if (dbErr.code !== "42P01") console.warn(`⚠️ [Quote] listing_fees query failed for ${listingId}:`, dbErr.message);
+    }
+
+    return { base, cleaning, taxes, otherFees, totalGross, currency, feeBreakdown, priceSource };
+  } catch (error) {
+    console.error(`❌ [Quote] getGuestyBreakdownWithFees failed for ${listingId}:`, error.message);
+    return null;
+  }
+}
+
+
+async function getGuestyBreakdown(listingId, checkIn, checkOut, guests, commissionPct) {
+  try {
+    // ✅ Payload correcto para el Open API /v1/quotes
     const payload = {
-      listingId: listingId,
+      listingId,
       checkInDateLocalized: checkIn,
       checkOutDateLocalized: checkOut,
       guestsCount: Number(guests) || 1,
       source: "villanet_email_system",
+      ignoreCalendar: false,
+      ignoreTerms: false,
+      ignoreBlocks: false,
     };
 
-    const guestyResp = await guesty.post("/v1/quotes", payload);
+    let guestyResp;
+    try {
+      guestyResp = await guesty.post("/v1/quotes", payload);
+    } catch (e) {
+      // Retry sin guestsCount si falla con 400/422
+      if (e?.response?.status === 400 || e?.response?.status === 422) {
+        const payload2 = { ...payload };
+        delete payload2.guestsCount;
+        payload2.guests = Number(guests) || 1;
+            guestyResp = await guesty.post("/v1/quotes", payload2);
+      } else {
+        throw e;
+      }
+    }
 
-    // 🔥 USAMOS TU PARSER EXISTENTE (parseGuestyQuote)
-    const parsed = parseGuestyQuote(guestyResp?.data);
+    const data = guestyResp?.data || {};
+
+    // ✅ 1. OBTENER TOTAL OFICIAL
+    // Open API v1 pone el total en data.money.fare
+    const officialTotal = Number(data.money?.fare ?? data.price?.total ?? 0);
+    const currency = data.money?.currency || "USD";
+
+    // Parse items
+    const parsed = parseGuestyQuote(data); // Tu función existente
 
     const base = Number(parsed.base) || 0;
     const cleaning = Number(parsed.cleaning) || 0;
     const taxes = Number(parsed.taxes) || 0;
-    const otherFees = Number(parsed.otherFees) || 0;
 
-    // Cálculo de comisión idéntico a la calculadora (Base + Limpieza + Taxes)
-    const subtotal = base + cleaning + taxes;
-    const commission = subtotal * (Number(commissionPct) / 100);
-    const totalGross = subtotal + commission + otherFees;
+    // ✅ 2. CALCULAR POR DIFERENCIA
+    let totalGross = 0;
+    let otherFees = 0;
+
+    if (officialTotal > 0) {
+      totalGross = officialTotal;
+      // La diferencia se asigna a otros fees (rounding errors, fees no categorizados)
+      otherFees = totalGross - (base + cleaning + taxes);
+    } else {
+      // Fallback: Suma manual si la API no devolvió total en root
+      otherFees = Number(parsed.otherFees) || 0;
+      const subtotalBeforeTaxes = base + cleaning + otherFees;
+      totalGross = subtotalBeforeTaxes + taxes;
+    }
 
     return {
       base,
       cleaning,
       taxes,
       otherFees,
-      commission,
+      feeBreakdown: parsed.feeBreakdown || [],
       totalGross,
-      currency: parsed.currency || "USD",
+      currency,
     };
   } catch (error) {
-    // LOG CRÍTICO: Aquí veremos por qué Guesty dice 400
-    console.error(
-      `⚠️ Breakdown falló para ${listingId}:`,
-      e.response?.data?.message || e.response?.data || e.message,
-    );
+    console.error(`⚠️ Breakdown falló para ${listingId}:`, error.message);
     return null;
   }
 }
