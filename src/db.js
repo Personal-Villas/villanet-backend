@@ -9,5 +9,8 @@ export const pool = new Pool({
   password: process.env.PGPASSWORD,
   ssl: {
     rejectUnauthorized: false
-  }
+  },
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
 });
