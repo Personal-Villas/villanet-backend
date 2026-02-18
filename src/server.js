@@ -20,6 +20,7 @@ import publicMessagesRouter from './routes/public-messages.routes.js';
 import cartRoutes from './routes/cart.routes.js';
 import earlyAccessRoutes from './routes/early-access.routes.js';
 import quotesRoutes from './routes/quotes.routes.js'
+import leadsRoutes from './routes/leads.routes.js';
 
 const app = express();
 
@@ -52,6 +53,8 @@ app.use('/advisors', advisorsRoutes);
 app.use('/property-managers', propertyManagersRoutes);
 app.use('/cart', cartRoutes);
 app.use('/early-access', earlyAccessRoutes);
+app.use('/api/leads', leadsRoutes);
+
 // Rutas protegidas
 app.use('/auth', authRoutes);
 app.use('/admin', adminRoutes);
