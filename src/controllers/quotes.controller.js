@@ -233,10 +233,9 @@ export async function sendQuoteEmail(req, res) {
     }
     const quote = updateResult.rows[0];
     const itemsResult = await client.query(
-      `SELECT qi.*, COALESCE(l.villanet_commission_rate, 0) as commission_rate,
+      `SELECT qi.*,
               pm.logo_url as pm_logo_url, pm.name as pm_name
        FROM quote_items qi
-       LEFT JOIN listings l ON qi.listing_id = l.listing_id
        LEFT JOIN listing_property_managers pm ON l.listing_property_manager_id = pm.id
        WHERE qi.quote_id = $1`, [id]
     );
@@ -261,8 +260,7 @@ export async function sendQuoteEmail(req, res) {
             item.listing_id, 
             checkInYmd, 
             checkOutYmd, 
-            quote.guests, 
-            item.commission_rate
+            quote.guests
           );
         }
 
@@ -277,7 +275,7 @@ export async function sendQuoteEmail(req, res) {
           guestyUrl,
           breakdown: breakdown || {
             base: Number(item.price_usd) * nights, taxes: 0, cleaning: 0,
-            otherFees: 0, commission: 0, totalGross: Number(item.price_usd) * nights,
+            otherFees: 0, totalGross: Number(item.price_usd) * nights,
             currency: "USD", isEstimate: true,
           },
         };
@@ -507,7 +505,6 @@ export async function generateQuoteEmailHtml(quote, items, nights, checkInYmd, c
           ${b.cleaning > 0 ? `<div class="bd-row"><span class="bd-label">Cleaning Fee</span><span class="bd-val">${fmt(b.cleaning)}</span></div>` : ""}
           ${b.taxes    > 0 ? `<div class="bd-row"><span class="bd-label">Taxes</span><span class="bd-val">${fmt(b.taxes)}</span></div>` : ""}
           ${feeRows}
-          ${b.commission > 0 ? `<div class="bd-row"><span class="bd-label">Service Fee</span><span class="bd-val">${fmt(b.commission)}</span></div>` : ""}
           <div class="bd-row bd-total">
             <span class="bd-label">Total</span>
             <span class="bd-val">${fmt(b.totalGross)}</span>
@@ -560,10 +557,6 @@ export async function checkQuotesAvailability(req, res) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function clampPct(x, min = 0, max = 100) {
-  const n = Number(x);
-  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : min;
-}
 
 function isYmd(s) { return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s); }
 
@@ -666,15 +659,11 @@ export async function calculateQuote(req, res) {
       ? Math.max(1, Math.floor(guestsCountRaw))
       : 1;
 
-    // ✅ AJUSTE: Asegurar que commissionPct sea número válido
-    const commissionPct = clampPct(req.body?.commissionPct ?? 0);
-
     console.log(`🧾 [${requestId}] /quotes/calculate incoming`, {
       listingId,
       checkIn,
       checkOut,
       guestsCount,
-      commissionPct,
       userId: req.user?.id,
     });
 
@@ -756,8 +745,7 @@ export async function calculateQuote(req, res) {
     const cleaning = Number(parsed.cleaning) || 0;
     const taxes    = Number(parsed.taxes)    || 0;
 
-    const commission = (base * commissionPct) / 100;
-    const totalGross = base + taxes + commission;
+    const totalGross = base + cleaning + taxes;
 
     // ✅ AJUSTE: Aplicar redondeo money2 a todos los valores monetarios
     const response = {
@@ -768,8 +756,6 @@ export async function calculateQuote(req, res) {
         base: money2(base),
         cleaning: money2(cleaning),
         taxes: money2(taxes),
-        commissionPct,
-        commission: money2(commission),
         totalGross: money2(totalGross),
         otherFees: money2(parsed.otherFees || 0),
       },
@@ -904,7 +890,7 @@ function parseInvoiceItems(invoiceItems) {
 
 
 
-async function getGuestyBreakdown(listingId, checkIn, checkOut, guests, commissionPct = 0) {
+async function getGuestyBreakdown(listingId, checkIn, checkOut, guests) {
   const payload = {
     listingId,
     checkInDateLocalized: checkIn,
@@ -942,16 +928,14 @@ async function getGuestyBreakdown(listingId, checkIn, checkOut, guests, commissi
   const cleaning = Number(parsed.cleaning) || 0;
   const taxes = Number(parsed.taxes) || 0;
   const otherFees = Number(parsed.otherFees) || 0;
-  const commission = (base * commissionPct) / 100;
 
-  const totalGross = base + cleaning + taxes + otherFees + commission;
+  const totalGross = base + cleaning + taxes + otherFees;
   
   return {
     base,
     cleaning,
     taxes,
     otherFees,
-    commission,
     totalGross,
     currency: parsed.currency,
     priceSource: "guesty_open_api",
