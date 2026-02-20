@@ -241,7 +241,7 @@ export async function sendQuoteEmail(req, res) {
  FROM quote_items qi
  LEFT JOIN listings l ON qi.listing_id = l.listing_id
  LEFT JOIN listing_property_managers pm ON l.listing_property_manager_id = pm.id
- WHERE qi.quote_id = $1`
+ WHERE qi.quote_id = $1`, [id] 
     );
     const dbItems = itemsResult.rows;
     if (dbItems.length === 0) {
