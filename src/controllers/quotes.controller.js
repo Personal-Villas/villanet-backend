@@ -5,7 +5,6 @@ import {
   checkStrictAvailability,
 } from "../services/availability.service.js";
 import pLimit from "p-limit";
-import { guesty } from "../services/guestyClient.js";
 import crypto from "crypto";
 import {
   sendQuoteNotification,
@@ -17,6 +16,9 @@ import {
   validationError,
   notFoundError,
 } from "../utils/errorResponse.js";
+import { createOpenAPIQuote } from "../services/openApiQuote.service.js";
+import { extractGuestyPriceBreakdown } from "../services/extractGuestyPriceBreakdown.js";
+
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
@@ -366,11 +368,13 @@ export async function sendQuoteEmail(req, res) {
     const quote = updateResult.rows[0];
 
     const itemsResult = await client.query(
-      `SELECT qi.*,
-              pm.logo_url as pm_logo_url, pm.name as pm_name
-       FROM quote_items qi
-       LEFT JOIN listing_property_managers pm ON l.listing_property_manager_id = pm.id
-       WHERE qi.quote_id = $1`, [id]
+
+`SELECT qi.*,
+        pm.logo_url as pm_logo_url, pm.name as pm_name
+ FROM quote_items qi
+ LEFT JOIN listings l ON qi.listing_id = l.listing_id
+ LEFT JOIN listing_property_managers pm ON l.listing_property_manager_id = pm.id
+ WHERE qi.quote_id = $1`, [id] 
     );
     const dbItems = itemsResult.rows;
 
@@ -392,8 +396,14 @@ export async function sendQuoteEmail(req, res) {
         let breakdown = null;
 
         if (hasDates) {
+          console.log("📅 Fechas entrando a OpenAPI:", { checkIn, checkOut, guests });
           breakdown = await getGuestyBreakdown(
-            item.listing_id, checkInYmd, checkOutYmd, quote.guests
+            item.listing_id,
+            checkInYmd,
+            checkOutYmd,
+            quote.guests,
+            0,
+            item.guesty_booking_domain
           );
         }
 
@@ -403,15 +413,25 @@ export async function sendQuoteEmail(req, res) {
           checkInYmd, checkOutYmd, guests: quote.guests,
         });
 
+        // Fallback si no hay breakdown
+        if (!breakdown) {
+          breakdown = {
+            base: Number(item.price_usd) * nights,
+            cleaning: 0,
+            taxes: 0,
+            otherFees: 0,
+            feeBreakdown: [],
+            feesTotal: 0,
+            total: Number(item.price_usd) * nights,
+            currency: "USD",
+            priceSource: "fallback_estimate",
+          };
+        }
+
         return {
           ...item,
           guestyUrl,
-          breakdown: breakdown || {
-            base: Number(item.price_usd) * nights,
-            taxes: 0, cleaning: 0, otherFees: 0,
-            totalGross: Number(item.price_usd) * nights,
-            currency: "USD", isEstimate: true,
-          },
+          breakdown,
         };
       })
     );
@@ -485,18 +505,24 @@ export async function sendQuoteEmail(req, res) {
         guests: quote.guests, itemsCount: itemsWithFullData.length,
       })]
     );
-
-    const totalQuoteAmount = itemsWithFullData.reduce((s, i) => s + (i.breakdown?.totalGross || 0), 0);
-
+    
+    // ✅ Usamos total en lugar de totalGross
+    const totalQuoteAmount = itemsWithFullData.reduce((s, i) => s + (i.breakdown?.total || 0), 0);
+    
     notifySafely(() =>
       sendQuoteNotification({
         quoteId: id,
         guestName: `${quote.guest_first_name} ${quote.guest_last_name}`,
         advisorEmail: quote.travel_advisor_email,
         guestEmail: quote.guest_email || "Not provided",
-        villas: itemsWithFullData.map((i) => ({ name: i.listing_name, price: i.breakdown.totalGross })),
-        checkIn: checkInYmd, checkOut: checkOutYmd,
-        guests: quote.guests, totalPrice: totalQuoteAmount,
+        villas: itemsWithFullData.map((i) => ({ 
+          name: i.listing_name, 
+          price: i.breakdown.total  // ✅ Usamos total
+        })),
+        checkIn: checkInYmd,
+        checkOut: checkOutYmd,
+        guests: quote.guests,
+        totalPrice: totalQuoteAmount,
         downloadUrl: itemsWithFullData[0]?.guestyUrl,
       })
     );
@@ -566,12 +592,8 @@ export async function generateQuoteEmailHtml(
   };
 
   const fmt = (amount) => {
-    if (!amount) return "Contact for pricing";
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-      minimumFractionDigits: 0,
-    }).format(amount);
+    if (!amount && amount !== 0) return "Contact for pricing";
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0 }).format(amount);
   };
 
   const safeNights = nights || 1;
@@ -682,17 +704,14 @@ export async function generateQuoteEmailHtml(
 
   <!-- Villa cards -->
   <div class="content">
-    ${items
-      .map((item) => {
-        const b = item.breakdown;
-        if (!b) return "";
+    ${items.map((item) => {
+      const b = item.breakdown;
+      if (!b) return "";
 
-        const feeRows = (() => {
-          if (b.feeBreakdown?.length > 0) {
-            return b.feeBreakdown
-              .filter((f) => f.amount > 0)
-              .map(
-                (f) => `
+      // Generar filas de fees individuales
+      const feeRows = (() => {
+        if (b.feeBreakdown?.length > 0) {
+          return b.feeBreakdown.filter(f => f.amount > 0).map(f => `
             <div class="bd-row">
               <span class="bd-label">${f.title}</span>
               <span class="bd-val">${fmt(f.amount)}</span>
@@ -706,7 +725,15 @@ export async function generateQuoteEmailHtml(
           return "";
         })();
 
-        return `
+      // Fila de Fees total (si hay fees)
+      const feesTotalRow = (Number(b.feesTotal) > 0) ? `
+      <div class="bd-row">
+        <span class="bd-label">Fees</span>
+        <span class="bd-val">${fmt(b.feesTotal)}</span>
+      </div>
+    ` : "";
+
+      return `
     <div class="card">
       ${item.image_url ? `<img src="${item.image_url}" class="card-img" alt="${item.listing_name || "Villa"}">` : ""}
       <div class="card-body">
@@ -722,15 +749,16 @@ export async function generateQuoteEmailHtml(
             <span class="bd-val">${fmt(b.base)}</span>
           </div>
           ${b.cleaning > 0 ? `<div class="bd-row"><span class="bd-label">Cleaning Fee</span><span class="bd-val">${fmt(b.cleaning)}</span></div>` : ""}
-          ${b.taxes > 0 ? `<div class="bd-row"><span class="bd-label">Taxes</span><span class="bd-val">${fmt(b.taxes)}</span></div>` : ""}
+          ${feesTotalRow}
           ${feeRows}
+          ${b.taxes > 0 ? `<div class="bd-row"><span class="bd-label">Taxes</span><span class="bd-val">${fmt(b.taxes)}</span></div>` : ""}
+          
+          <!-- ✅ Total EXACTO del checkout (sin comisión) -->
           <div class="bd-row bd-total">
             <span class="bd-label">Total</span>
-            <span class="bd-val">${fmt(b.totalGross)}</span>
+            <span class="bd-val">${fmt(b.total)}</span>
           </div>
         </div>
-
-        <p class="disclaimer">* Estimate based on base rate + taxes. Additional platform fees may apply at checkout — click below to see the final price.</p>
 
         <div class="btn-wrap">
           <a href="${item.guestyUrl}" class="btn">View Availability &amp; Book &rarr;</a>
@@ -830,9 +858,7 @@ function safeJson(x) {
 function parseGuestyQuote(raw) {
   const q = raw?.data ?? raw ?? {};
 
-  // Búsqueda exhaustiva de invoiceItems - CORREGIDA con doble money
-  let invoiceItems = [];
-  invoiceItems =
+  const invoiceItems =
     q?.rates?.ratePlans?.[0]?.money?.money?.invoiceItems ||
     q?.rates?.ratePlans?.[0]?.money?.invoiceItems ||
     q?.rates?.ratePlans?.[0]?.invoiceItems ||
@@ -842,50 +868,16 @@ function parseGuestyQuote(raw) {
     q?.priceBreakdown?.invoiceItems ||
     [];
 
-  // Base: accommodation fare / AF
-  const base = sumByPred(invoiceItems, (it) => {
-    const t = String(it.type || it.normalType || it.title || "").toLowerCase();
-    return (
-      t.includes("accommodation") ||
-      t.includes("fare") ||
-      it.normalType === "AF" ||
-      it.title?.toLowerCase().includes("accommodation fare")
-    );
-  });
-
-  // Cleaning
-  const cleaning = sumByPred(invoiceItems, (it) => {
-    const t = String(it.type || it.normalType || it.title || "").toLowerCase();
-    return t.includes("clean") || t.includes("cleaning");
-  });
-
-  // Taxes (incluye isTax y tipos con "tax")
-  const taxes = sumByPred(invoiceItems, (it) => {
-    const t = String(it.type || it.normalType || it.title || "").toLowerCase();
-    return (
-      t.includes("tax") ||
-      it.isTax === true ||
-      it.normalType === "LT" ||
-      it.normalType === "TAX"
-    );
-  });
-
-  // Otros fees
-  const otherFees = sumByPred(invoiceItems, (it) => {
-    const t = String(it.type || it.normalType || it.title || "").toLowerCase();
-    const isFee =
-      t.includes("fee") || t.includes("service") || t.includes("resort");
-    return isFee && !t.includes("clean") && !t.includes("tax");
-  });
-
-  const currency =
-    invoiceItems[0]?.currency ||
-    q?.rates?.ratePlans?.[0]?.days?.[0]?.currency ||
-    q?.money?.currency ||
-    q?.currency ||
-    "USD";
-
-  return { currency, base, cleaning, taxes, otherFees, invoiceItems };
+  const parsed = parseInvoiceItems(invoiceItems);
+  return {
+    currency: parsed.currency,
+    base: parsed.base,
+    cleaning: parsed.cleaning,
+    taxes: parsed.taxes,
+    otherFees: parsed.otherFees,
+    feeBreakdown: parsed.feeBreakdown,
+    invoiceItems,
+  };
 }
 
 export async function calculateQuote(req, res) {
@@ -895,146 +887,54 @@ export async function calculateQuote(req, res) {
     const listingId = String(req.body?.listingId || "").trim();
     const checkIn = String(req.body?.checkIn || "").trim();
     const checkOut = String(req.body?.checkOut || "").trim();
+    const guestsCount = Math.max(1, Math.floor(Number(req.body?.guests ?? req.body?.guestsCount ?? 1)));
+    const commissionPct = clampPct(req.body?.commissionPct ?? 0);
 
-    const guestsCountRaw = Number(
-      req.body?.guests ?? req.body?.guestsCount ?? 1,
-    );
-    const guestsCount = Number.isFinite(guestsCountRaw)
-      ? Math.max(1, Math.floor(guestsCountRaw))
-      : 1;
+    if (!listingId || !isYmd(checkIn) || !isYmd(checkOut) || new Date(checkIn) >= new Date(checkOut)) {
+      return res.status(400).json({ ok: false, error: "Parámetros inválidos" });
+    }
 
-    console.log(`🧾 [${requestId}] /quotes/calculate incoming`, {
+    const nights = countStayNights(checkIn, checkOut);
+
+    // Solo Open API (ya no fallback a BE ni cálculo manual)
+    const quote = await createOpenAPIQuote({
       listingId,
       checkIn,
       checkOut,
       guestsCount,
-      userId: req.user?.id,
+      source: "booking-engine",
     });
 
-    if (!listingId)
-      return res.status(400).json({ ok: false, error: "listingId requerido" });
-    if (!isYmd(checkIn) || !isYmd(checkOut))
-      return res
-        .status(400)
-        .json({ ok: false, error: "checkIn/checkOut deben ser YYYY-MM-DD" });
-    if (new Date(checkIn) >= new Date(checkOut))
-      return res
-        .status(400)
-        .json({ ok: false, error: "checkOut debe ser posterior a checkIn" });
+    const breakdown = extractGuestyPriceBreakdown(quote);
 
-    const nights = countStayNights(checkIn, checkOut);
-    if (nights <= 0)
-      return res.status(400).json({ ok: false, error: "Rango inválido" });
+    const commission = breakdown.total * (commissionPct / 100);
+    const totalGross = breakdown.total + commission;
 
-    let cacheKey = null;
-    try {
-      cacheKey = crypto
-        .createHash("sha1")
-        .update(JSON.stringify({ listingId, checkIn, checkOut, guestsCount }))
-        .digest("hex");
-      console.log(`🧠 [${requestId}] cacheKey`, cacheKey);
-    } catch (e) {
-      console.warn(`⚠️ [${requestId}] cacheKey error`, e?.message);
-    }
-
-    const payload = {
-      listingId,
-      checkInDateLocalized: checkIn,
-      checkOutDateLocalized: checkOut,
-      guestsCount,
-      source: "villanet_calculator",
-      ignoreCalendar: false,
-      ignoreTerms: false,
-      ignoreBlocks: false,
-    };
-
-    console.log(
-      `➡️ [${requestId}] Guesty Open API POST /v1/quotes payload`,
-      payload,
-    );
-
-    let guestyResp;
-    try {
-      guestyResp = await guesty.post("/v1/quotes", payload);
-    } catch (e) {
-      const status = e?.response?.status;
-      console.error(`❌ [${requestId}] Guesty call failed`, {
-        status,
-        message: e?.message,
-        data: safeJson(e?.response?.data),
-      });
-
-      if (status === 400 || status === 422) {
-        const payload2 = { ...payload };
-        delete payload2.guestsCount;
-        payload2.guests = guestsCount;
-        try {
-          guestyResp = await guesty.post("/v1/quotes", payload2);
-        } catch (e2) {
-          console.error(`❌ Retry failed`, {
-            data: safeJson(e2?.response?.data),
-          });
-          throw e2;
-        }
-      } else {
-        throw e;
-      }
-    }
-
-    const parsed = parseGuestyQuote(guestyResp?.data);
-
-    console.log(`🧩 [${requestId}] Parsed breakdown`, parsed);
-
-    const base = Number(parsed.base) || 0;
-    const cleaning = Number(parsed.cleaning) || 0;
-    const taxes = Number(parsed.taxes) || 0;
-
-    const totalGross = base + cleaning + taxes;
-
-    // ✅ AJUSTE: Aplicar redondeo money2 a todos los valores monetarios
     const response = {
       ok: true,
-      currency: parsed.currency,
+      currency: breakdown.currency,
       nights,
       breakdown: {
-        base: money2(base),
-        cleaning: money2(cleaning),
-        taxes: money2(taxes),
+        base: money2(breakdown.base),
+        cleaning: money2(breakdown.cleaning || 0),
+        taxes: money2(breakdown.taxes),
+        feeBreakdown: breakdown.feeBreakdown,
+        feesTotal: money2(breakdown.feesTotal),
+        commissionPct,
+        commission: money2(commission),
         totalGross: money2(totalGross),
-        otherFees: money2(parsed.otherFees || 0),
       },
-      source: "guesty_quote",
-      ...(process.env.NODE_ENV === "development"
-        ? {
-            debug: {
-              requestId,
-              payloadSent: payload,
-              cacheKey,
-              invoiceItemsCount: parsed.invoiceItems?.length ?? 0,
-              guestyStatus: guestyResp?.status,
-            },
-          }
-        : {}),
+      source: "open-api",
+      ...(process.env.NODE_ENV === "development" && { debug: { requestId } }),
     };
 
-    console.log(`✅ [${requestId}] /quotes/calculate response`, response);
     return res.json(response);
   } catch (e) {
-    console.error(`🔥 [${requestId}] error FULL`, {
-      message: e?.message,
-      status: e?.response?.status,
-      data: safeJson(e?.response?.data),
-      stack: e?.stack,
-    });
+    console.error(`🔥 [${requestId}] error`, e);
     return res.status(502).json({
       ok: false,
       error: "guesty_quote_failed",
-      message:
-        "Failed to connect to Guesty. Please check your connection and retry",
-      requestId,
-      ...(process.env.NODE_ENV === "development"
-        ? { details: e?.response?.data || e.message }
-        : {}),
+      message: "No se pudo obtener cotización de Guesty",
     });
   }
 }
@@ -1043,7 +943,6 @@ export async function calculateQuote(req, res) {
  * Helper para parsear invoice items de Guesty
  * Separa en: base, cleaning, taxes, y otros fees
  */
-
 function parseInvoiceItems(invoiceItems) {
   if (!Array.isArray(invoiceItems) || invoiceItems.length === 0) {
     return {
@@ -1088,8 +987,6 @@ function parseInvoiceItems(invoiceItems) {
   // Otros Fees (TODO lo que no sea base, cleaning o tax)
   const otherFees = sumByPred(invoiceItems, (it) => {
     const type = String(it.type || it.normalType || "").toUpperCase();
-
-    // Excluir base, cleaning y taxes
     const isBase =
       type.includes("ACCOMMODATION") ||
       type === "AF" ||
@@ -1100,7 +997,6 @@ function parseInvoiceItems(invoiceItems) {
       it.isTax === true ||
       type === "LT" ||
       type === "TAX";
-
     return !isBase && !isCleaning && !isTax;
   });
 
@@ -1131,57 +1027,42 @@ function parseInvoiceItems(invoiceItems) {
   return { base, cleaning, taxes, otherFees, feeBreakdown, currency };
 }
 
-async function getGuestyBreakdown(listingId, checkIn, checkOut, guests) {
-  const payload = {
-    listingId,
-    checkInDateLocalized: checkIn,
-    checkOutDateLocalized: checkOut,
-    guestsCount: Number(guests) || 1,
-    source: "villanet_quote",
-    ignoreCalendar: false,
-  };
+async function getGuestyBreakdown(listingId, checkIn, checkOut, guests, commissionPct = 0, bookingDomain = null) {
+  let quoteData = null;
+  let sourceUsed = "open-api";
 
-  let guestyResp;
   try {
-    guestyResp = await guesty.post("/v1/quotes", payload);
-  } catch (e) {
-    // Retry logic: Open API a veces requiere 'guests' en lugar de 'guestsCount'
-    const status = e?.response?.status;
-    if (status === 400 || status === 422) {
-      const payloadRetry = { ...payload };
-      delete payloadRetry.guestsCount;
-      payloadRetry.guests = Number(guests) || 1;
-      try {
-        guestyResp = await guesty.post("/v1/quotes", payloadRetry);
-      } catch (e2) {
-        console.error(
-          `❌ Guesty Quote API failed for ${listingId} (retry):`,
-          e2.message,
-        );
-        return null;
-      }
-    } else {
-      console.error(`❌ Guesty Quote API failed for ${listingId}:`, e.message);
-      return null;
-    }
+    quoteData = await createOpenAPIQuote({
+      listingId,
+      checkIn,
+      checkOut,
+      guestsCount: Number(guests) || 1,
+      source: "manual", 
+    });
+  } catch (openErr) {
+    console.warn(`OpenAPI falló (${openErr.response?.status}):`, openErr.response?.data);
+    sourceUsed = "fallback-manual";
+    // Aquí podrías agregar fallback real si lo necesitas
   }
 
-  const parsed = parseGuestyQuote(guestyResp?.data);
+  if (!quoteData) {
+    return null; 
+  }
 
-  const base = Number(parsed.base) || 0;
-  const cleaning = Number(parsed.cleaning) || 0;
-  const taxes = Number(parsed.taxes) || 0;
-  const otherFees = Number(parsed.otherFees) || 0;
-
-  const totalGross = base + cleaning + taxes + otherFees;
-
+  const breakdown = extractGuestyPriceBreakdown(quoteData);
+  
   return {
-    base,
-    cleaning,
-    taxes,
-    otherFees,
-    totalGross,
-    currency: parsed.currency,
-    priceSource: "guesty_open_api",
+    currency: breakdown.currency,
+    nights: countStayNights(checkIn, checkOut),
+    base: breakdown.base,
+    taxes: breakdown.taxes,
+    feeBreakdown: breakdown.feeBreakdown,
+    feesTotal: breakdown.feesTotal,
+    total: breakdown.total,
+    priceSource: sourceUsed,
+    internal: {
+      villanetCommission: breakdown.total * (commissionPct / 100),
+      commissionPct,
+    },
   };
 }

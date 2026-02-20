@@ -1,76 +1,98 @@
-import { pool } from '../db.js';
+import { pool } from "../db.js";
 
 /**
- * Lee SIEMPRE el token desde la BD (tabla settings),
- * sin pedirlo a OAuth ni escribir nada.
- *
- * El cron externo se encargará de renovarlo y actualizar
- * la fila 'GUESTY_OAUTH_TOKEN' (y opcionalmente 'GUESTY_OAUTH_EXPIRES_AT').
+ * Settings keys en DB (solo para Open API token)
  */
+const KEY_OA_TOKEN = "GUESTY_OAUTH_TOKEN";
+const KEY_OA_EXPIRES_AT = "GUESTY_OAUTH_EXPIRES_AT";
 
-const KEY_TOKEN = 'GUESTY_OAUTH_TOKEN';
-const KEY_EXPIRES_AT = 'GUESTY_OAUTH_EXPIRES_AT';
+/**
+ * Cache en memoria (soft TTL para evitar hits constantes a DB)
+ */
+let MEM_OA_TOKEN = null;
+let MEM_OA_EXPIRES_AT = 0;
+let MEM_OA_FETCHED_AT = 0;
 
-// cache en memoria para evitar hits constantes a la BD
-let MEM_TOKEN = null;
-let MEM_EXPIRES_AT = 0;      // opcional: si guardás expires en la BD
-let MEM_FETCHED_AT = 0;
+const SOFT_TTL_MS = 5 * 60 * 1000; // 5 min
 
-const SOFT_TTL_MS = 5 * 60 * 1000; // 5 min (relee desde BD pasado este tiempo)
-
-/** Lee el token (y opcionalmente el expires) desde BD */
-async function readTokenFromDB() {
+/**
+ * Helpers DB
+ */
+async function readSettings(keys) {
   const { rows } = await pool.query(
     `SELECT key, value, extract(epoch from updated_at)*1000 as updated_ms
      FROM settings
-     WHERE key IN ($1, $2)`,
-    [KEY_TOKEN, KEY_EXPIRES_AT]
+     WHERE key = ANY($1::text[])`,
+    [keys]
   );
+  const map = new Map(rows.map((r) => [r.key, r.value]));
+  return map;
+}
 
-  let token = null;
-  let expiresAt = 0;
+async function upsertSetting(key, value) {
+  await pool.query(
+    `INSERT INTO settings (key, value, updated_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [key, String(value ?? "")]
+  );
+}
 
-  for (const r of rows) {
-    if (r.key === KEY_TOKEN) token = r.value;
-    if (r.key === KEY_EXPIRES_AT) expiresAt = Number(r.value) || 0;
-  }
+function nowMs() {
+  return Date.now();
+}
+
+function looksLikeJwt(token) {
+  if (!token || typeof token !== "string") return false;
+  const parts = token.split(".");
+  return parts.length === 3;
+}
+
+function isExpired(expiresAtMs, skewMs = 3600000) {
+  // 1 hora de skew
+  if (!expiresAtMs || !Number.isFinite(expiresAtMs)) return true;
+  return nowMs() + skewMs >= expiresAtMs;
+}
+
+/**
+ * =========================
+ * Open API Token
+ * =========================
+ * Lee desde settings en DB y cachea por unos minutos.
+ */
+async function readOpenApiTokenFromDB() {
+  const map = await readSettings([KEY_OA_TOKEN, KEY_OA_EXPIRES_AT]);
+  const token = map.get(KEY_OA_TOKEN) || null;
+  const expiresAt = Number(map.get(KEY_OA_EXPIRES_AT)) || 0;
+
   if (!token) {
-    throw new Error('Guesty OAuth token not found in settings (GUESTY_OAUTH_TOKEN).');
+    throw new Error(
+      `Guesty OAuth token not found in settings (${KEY_OA_TOKEN}).`
+    );
   }
   return { token, expiresAt };
 }
 
-/** Devuelve un token válido leído desde BD (cacheado unos minutos) */
 export async function getGuestyAccessToken() {
-  const now = Date.now();
-  const freshEnough = (now - MEM_FETCHED_AT) < SOFT_TTL_MS;
+  const now = nowMs();
+  const freshEnough = now - MEM_OA_FETCHED_AT < SOFT_TTL_MS;
 
-  // si está fresco en memoria, úsalo
-  if (MEM_TOKEN && freshEnough) {
-    return MEM_TOKEN;
-  }
+  if (MEM_OA_TOKEN && freshEnough) return MEM_OA_TOKEN;
 
-  // relee desde BD
-  const { token, expiresAt } = await readTokenFromDB();
-  MEM_TOKEN = token;
-  MEM_EXPIRES_AT = expiresAt || 0;
-  MEM_FETCHED_AT = now;
-  return MEM_TOKEN;
+  const { token, expiresAt } = await readOpenApiTokenFromDB();
+  MEM_OA_TOKEN = token;
+  MEM_OA_EXPIRES_AT = expiresAt || 0;
+  MEM_OA_FETCHED_AT = now;
+  return MEM_OA_TOKEN;
 }
 
-/**
- * Forzar recarga desde BD (p.ej. al recibir 401/403 desde Guesty,
- * o cuando el cron ya actualizó el token y queremos tomarlo).
- */
 export async function forceRefreshGuestyToken() {
-  MEM_TOKEN = null;
-  MEM_EXPIRES_AT = 0;
-  MEM_FETCHED_AT = 0;
-  // lee inmediatamente el nuevo valor desde BD
+  MEM_OA_TOKEN = null;
+  MEM_OA_EXPIRES_AT = 0;
+  MEM_OA_FETCHED_AT = 0;
   return getGuestyAccessToken();
 }
 
-// (Opcional) exportar el expires por si querés loguearlo
 export function getCachedGuestyExpiry() {
-  return MEM_EXPIRES_AT || 0;
+  return MEM_OA_EXPIRES_AT || 0;
 }
