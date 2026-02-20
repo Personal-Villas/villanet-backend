@@ -235,11 +235,13 @@ export async function sendQuoteEmail(req, res) {
     }
     const quote = updateResult.rows[0];
     const itemsResult = await client.query(
-      `SELECT qi.*,
-              pm.logo_url as pm_logo_url, pm.name as pm_name
-       FROM quote_items qi
-       LEFT JOIN listing_property_managers pm ON l.listing_property_manager_id = pm.id
-       WHERE qi.quote_id = $1`, [id]
+
+`SELECT qi.*,
+        pm.logo_url as pm_logo_url, pm.name as pm_name
+ FROM quote_items qi
+ LEFT JOIN listings l ON qi.listing_id = l.listing_id
+ LEFT JOIN listing_property_managers pm ON l.listing_property_manager_id = pm.id
+ WHERE qi.quote_id = $1`
     );
     const dbItems = itemsResult.rows;
     if (dbItems.length === 0) {
@@ -811,8 +813,6 @@ async function getGuestyBreakdown(listingId, checkIn, checkOut, guests, commissi
   }
 
   const breakdown = extractGuestyPriceBreakdown(quoteData);
-
-  const totalGross = base + cleaning + taxes + otherFees;
   
   return {
     currency: breakdown.currency,
