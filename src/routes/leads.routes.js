@@ -1,6 +1,6 @@
-import express from 'express';
-import { pool } from '../db.js'; 
-import { sendExpansionLeadNotification } from '../services/email.service.js';
+import express from "express";
+import { pool } from "../db.js";
+import { sendExpansionLeadNotification, sendVillaInquiryNotification } from "../services/email.service.js";
 
 const router = express.Router();
 
@@ -9,9 +9,9 @@ const router = express.Router();
  * Crea un lead de expansión de búsqueda
  * Endpoint PÚBLICO - no requiere autenticación
  */
-router.post('/expansion-request', async (req, res) => {
+router.post("/expansion-request", async (req, res) => {
   let client;
-  
+
   try {
     const {
       fullName,
@@ -32,13 +32,13 @@ router.post('/expansion-request', async (req, res) => {
     // Validación básica - nombre y email son requeridos
     if (!fullName || !fullName.trim()) {
       return res.status(400).json({
-        error: 'Full name is required',
+        error: "Full name is required",
       });
     }
 
     if (!email || !email.trim()) {
       return res.status(400).json({
-        error: 'Email is required',
+        error: "Email is required",
       });
     }
 
@@ -46,14 +46,14 @@ router.post('/expansion-request', async (req, res) => {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({
-        error: 'Invalid email address',
+        error: "Invalid email address",
       });
     }
 
     // Validación de preferencias de búsqueda
     if (!location && !checkIn && !checkOut) {
       return res.status(400).json({
-        error: 'Please provide at least a location or dates',
+        error: "Please provide at least a location or dates",
       });
     }
 
@@ -66,14 +66,14 @@ router.post('/expansion-request', async (req, res) => {
     }
 
     // Convertir arrays a string para guardar
-    const bedroomsStr = Array.isArray(bedrooms) 
-      ? bedrooms.join(',') 
+    const bedroomsStr = Array.isArray(bedrooms)
+      ? bedrooms.join(",")
       : bedrooms || null;
-    
-    const bathroomsStr = Array.isArray(bathrooms) 
-      ? bathrooms.join(',') 
+
+    const bathroomsStr = Array.isArray(bathrooms)
+      ? bathrooms.join(",")
       : bathrooms || null;
-    
+
     const amenitiesJson = JSON.stringify(amenities || []);
     const searchContextJson = JSON.stringify(searchContext || {});
 
@@ -118,14 +118,16 @@ router.post('/expansion-request', async (req, res) => {
       amenitiesJson,
       currentResultsCount ? parseInt(currentResultsCount) : null,
       searchContextJson,
-      'pending',
-      'web',
+      "pending",
+      "web",
     ];
 
     const result = await client.query(query, values);
     const { id: leadId, created_at } = result.rows[0];
 
-    console.log(`✅ Expansion lead created: ID ${leadId} - ${fullName} (${email})`);
+    console.log(
+      `✅ Expansion lead created: ID ${leadId} - ${fullName} (${email})`,
+    );
 
     // Liberar cliente del pool
     client.release();
@@ -145,47 +147,47 @@ router.post('/expansion-request', async (req, res) => {
       amenities: amenitiesJson,
       current_results_count: currentResultsCount,
     }).catch((emailError) => {
-      console.error('❌ Error sending email notification:', emailError);
+      console.error("❌ Error sending email notification:", emailError);
       // No fallar la request si el email falla
     });
 
     res.status(201).json({
       success: true,
-      message: 'Your request has been received. We\'ll get back to you soon!',
+      message: "Your request has been received. We'll get back to you soon!",
       leadId,
       createdAt: created_at,
     });
   } catch (error) {
-    console.error('❌ Error creating expansion lead:', error);
-    
+    console.error("❌ Error creating expansion lead:", error);
+
     // Liberar cliente si hay error
     if (client) {
       client.release();
     }
-    
+
     // Error de base de datos
     if (error.code) {
       // Errores específicos de PostgreSQL
-      if (error.code === '28000') {
+      if (error.code === "28000") {
         return res.status(500).json({
-          error: 'Database authentication error. Please contact support.',
+          error: "Database authentication error. Please contact support.",
         });
       }
-      
-      if (error.code === 'ENOTFOUND') {
+
+      if (error.code === "ENOTFOUND") {
         return res.status(500).json({
-          error: 'Database connection error. Please try again later.',
+          error: "Database connection error. Please try again later.",
         });
       }
 
       return res.status(500).json({
-        error: 'Database error. Please try again.',
+        error: "Database error. Please try again.",
         code: error.code,
       });
     }
 
     res.status(500).json({
-      error: 'Failed to process your request. Please try again.',
+      error: "Failed to process your request. Please try again.",
     });
   }
 });
@@ -195,9 +197,9 @@ router.post('/expansion-request', async (req, res) => {
  * Lista todos los expansion leads (para admin)
  * Requiere autenticación de admin
  */
-router.get('/expansion-requests', async (req, res) => {
+router.get("/expansion-requests", async (req, res) => {
   let client;
-  
+
   try {
     // TODO: Agregar middleware de autenticación admin aquí
     // if (!req.user || req.user.role !== 'admin') {
@@ -239,7 +241,7 @@ router.get('/expansion-requests', async (req, res) => {
     }
 
     if (conditions.length > 0) {
-      query += ' WHERE ' + conditions.join(' AND ');
+      query += " WHERE " + conditions.join(" AND ");
     }
 
     query += ` ORDER BY created_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`;
@@ -249,11 +251,13 @@ router.get('/expansion-requests', async (req, res) => {
     const result = await client.query(query, values);
 
     // Contar total
-    const countQuery = conditions.length > 0
-      ? `SELECT COUNT(*) FROM expansion_leads WHERE ${conditions.join(' AND ')}`
-      : `SELECT COUNT(*) FROM expansion_leads`;
-    
-    const countValues = conditions.length > 0 ? values.slice(0, conditions.length) : [];
+    const countQuery =
+      conditions.length > 0
+        ? `SELECT COUNT(*) FROM expansion_leads WHERE ${conditions.join(" AND ")}`
+        : `SELECT COUNT(*) FROM expansion_leads`;
+
+    const countValues =
+      conditions.length > 0 ? values.slice(0, conditions.length) : [];
     const countResult = await client.query(countQuery, countValues);
     const total = parseInt(countResult.rows[0].count);
 
@@ -267,14 +271,14 @@ router.get('/expansion-requests', async (req, res) => {
       offset: parseInt(offset),
     });
   } catch (error) {
-    console.error('❌ Error fetching expansion leads:', error);
-    
+    console.error("❌ Error fetching expansion leads:", error);
+
     if (client) {
       client.release();
     }
-    
+
     res.status(500).json({
-      error: 'Failed to fetch leads',
+      error: "Failed to fetch leads",
     });
   }
 });
@@ -283,19 +287,19 @@ router.get('/expansion-requests', async (req, res) => {
  * PATCH /api/leads/expansion-requests/:id
  * Actualiza el estado de un lead (para admin)
  */
-router.patch('/expansion-requests/:id', async (req, res) => {
+router.patch("/expansion-requests/:id", async (req, res) => {
   let client;
-  
+
   try {
     // TODO: Agregar middleware de autenticación admin aquí
 
     const { id } = req.params;
     const { status, notes } = req.body;
 
-    const validStatuses = ['pending', 'contacted', 'converted', 'expired'];
+    const validStatuses = ["pending", "contacted", "converted", "expired"];
     if (status && !validStatuses.includes(status)) {
       return res.status(400).json({
-        error: 'Invalid status',
+        error: "Invalid status",
         validStatuses,
       });
     }
@@ -309,14 +313,14 @@ router.patch('/expansion-requests/:id', async (req, res) => {
       values.push(status);
       paramIndex++;
 
-      if (status === 'contacted') {
+      if (status === "contacted") {
         updates.push(`contacted_at = CURRENT_TIMESTAMP`);
       }
     }
 
     if (updates.length === 0) {
       return res.status(400).json({
-        error: 'No updates provided',
+        error: "No updates provided",
       });
     }
 
@@ -324,7 +328,7 @@ router.patch('/expansion-requests/:id', async (req, res) => {
 
     const query = `
       UPDATE expansion_leads
-      SET ${updates.join(', ')}
+      SET ${updates.join(", ")}
       WHERE id = $${paramIndex}
       RETURNING *
     `;
@@ -335,7 +339,7 @@ router.patch('/expansion-requests/:id', async (req, res) => {
 
     if (result.rows.length === 0) {
       return res.status(404).json({
-        error: 'Lead not found',
+        error: "Lead not found",
       });
     }
 
@@ -344,15 +348,101 @@ router.patch('/expansion-requests/:id', async (req, res) => {
       lead: result.rows[0],
     });
   } catch (error) {
-    console.error('❌ Error updating expansion lead:', error);
-    
+    console.error("❌ Error updating expansion lead:", error);
+
     if (client) {
       client.release();
     }
-    
+
     res.status(500).json({
-      error: 'Failed to update lead',
+      error: "Failed to update lead",
     });
+  }
+});
+
+/**
+ * POST /api/leads/villa-inquiry
+ * Crea un lead de consulta de villa desde stbarts.thevillanet.com
+ * Endpoint PÚBLICO - no requiere autenticación
+ */
+router.post("/villa-inquiry", async (req, res) => {
+  let client;
+
+  try {
+    const {
+      listingId,
+      listingName,
+      fullName,
+      email,
+      whatsapp,
+      checkIn,
+      checkOut,
+      guests,
+      message,
+    } = req.body;
+
+    if (!fullName?.trim())
+      return res.status(400).json({ error: "Full name is required" });
+    if (!email?.trim())
+      return res.status(400).json({ error: "Email is required" });
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email))
+      return res.status(400).json({ error: "Invalid email address" });
+
+    client = await pool.connect();
+
+    const result = await client.query(
+      `
+      INSERT INTO villa_inquiry_leads (
+        listing_id, listing_name, full_name, email, whatsapp,
+        check_in, check_out, guests, message, status, source
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending','stbarts')
+      RETURNING id, created_at
+    `,
+      [
+        listingId || null,
+        listingName || null,
+        fullName.trim(),
+        email.trim().toLowerCase(),
+        whatsapp?.trim() || null,
+        checkIn || null,
+        checkOut || null,
+        guests ? parseInt(guests) : null,
+        message?.trim() || null,
+      ],
+    );
+
+    client.release();
+
+    sendVillaInquiryNotification({
+      full_name: fullName.trim(),
+      user_email: email.trim().toLowerCase(),
+      whatsapp: whatsapp || null,
+      listing_name: listingName,
+      check_in: checkIn,
+      check_out: checkOut,
+      guests,
+      message: message || null,
+    }).catch((err) => console.error("❌ Villa inquiry email error:", err));
+
+    const { id: leadId, created_at } = result.rows[0];
+    console.log(
+      `✅ Villa inquiry lead created: ID ${leadId} - ${fullName} (${email}) - ${listingName}`,
+    );
+
+    res.status(201).json({
+      success: true,
+      message:
+        "Your inquiry has been received. We'll get back to you within 24h!",
+      leadId,
+      createdAt: created_at,
+    });
+  } catch (error) {
+    if (client) client.release();
+    console.error("❌ Error creating villa inquiry lead:", error);
+    res
+      .status(500)
+      .json({ error: "Failed to process your request. Please try again." });
   }
 });
 
