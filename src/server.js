@@ -38,6 +38,8 @@ app.use(
       'https://villanet-frontend.onrender.com',
       'https://thevillanet.com',
       'https://www.thevillanet.com',
+      'http://localhost:5173',
+      'https://stbarts-villas.onrender.com'
     ],
     credentials: true,
   })
