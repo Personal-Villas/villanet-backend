@@ -708,6 +708,7 @@ function buildBadgeFilters(badgeSlugs, VILLANET_BADGE_FIELD_MAP) {
 function normalizeResults(rows) {
   const PLACEHOLDER =
     "https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200";
+  const MAX_GRID_IMAGES = 3; // ⬅️ NUEVO: límite para el grid
 
   return rows.map((r) => {
     const normalizeBoolean = (value) => {
@@ -725,6 +726,15 @@ function normalizeResults(rows) {
 
     // Remover el campo ordinality si existe
     const { ordinality, ...rest } = r;
+
+    // 👇 NUEVO: limpieza + límite de imágenes
+    const rawImages = Array.isArray(r.images_json) ? r.images_json : [];
+
+    const cleanedImages = rawImages.filter(
+      (img) => img !== "Unknown" && img !== "Villas not verified",
+    );
+
+    const limitedImages = cleanedImages.slice(0, MAX_GRID_IMAGES);
 
     return {
       ...rest,
@@ -744,22 +754,16 @@ function normalizeResults(rows) {
           ? r.villanet_destination_tag
           : "",
 
-      // 3. LIMPIEZA DE IMAGES_JSON (A veces se guardan tags aquí por error)
-      images_json: Array.isArray(r.images_json)
-        ? r.images_json.filter(
-            (img) => img !== "Unknown" && img !== "Villas not verified",
-          )
-        : [],
+      // 3. LIMPIEZA + LÍMITE DE IMAGES_JSON PARA EL GRID
+      images_json: limitedImages,
 
       // 4. VERIFICACIÓN (Solo booleano, sin textos de advertencia)
       trustAccount: !!r.trust_account,
 
       rank: r.rank !== null ? Number(r.rank) : null,
-      
-      heroImage:
-        (Array.isArray(r.images_json) && r.images_json[0]) ||
-        r.heroImage ||
-        PLACEHOLDER,
+
+      // 👇 usar el array ya limitado/limpio
+      heroImage: limitedImages[0] || r.heroImage || PLACEHOLDER,
 
       villanetChefIncluded: normalizeBoolean(r.villanetChefIncluded),
       villanetHeatedPool: normalizeBoolean(r.villanetHeatedPool),
