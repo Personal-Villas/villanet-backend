@@ -20,6 +20,7 @@ import { createOpenAPIQuote } from "../services/openApiQuote.service.js";
 import { extractGuestyPriceBreakdown } from "../services/extractGuestyPriceBreakdown.js";
 
 
+
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
 function countStayNights(from, to) {
@@ -593,7 +594,11 @@ export async function generateQuoteEmailHtml(
 
   const fmt = (amount) => {
     if (!amount && amount !== 0) return "Contact for pricing";
-    return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0 }).format(amount);
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: 0,
+    }).format(amount);
   };
 
   const safeNights = nights || 1;
@@ -603,185 +608,315 @@ export async function generateQuoteEmailHtml(
     : `Hello, Travel Advisor`;
   const intro = isGuest
     ? `Here are your curated villa options, handpicked based on your preferences.`
-    : `Here is the quote prepared for your client, <strong>${quote.guest_first_name} ${quote.guest_last_name}</strong>.`;
+    : `Here is the quote prepared for your client, <strong style="font-weight:600;">${quote.guest_first_name} ${quote.guest_last_name}</strong>.`;
 
   // PNG icons — email-safe (no SVG)
-  const iconPin = `<img src="https://img.icons8.com/?size=100&id=3723&format=png&color=71717a"   width="13" height="13" style="vertical-align:middle;margin-right:5px;" alt="">`;
-  const iconBed = `<img src="https://img.icons8.com/?size=100&id=7546&format=png&color=71717a"   width="13" height="13" style="vertical-align:middle;margin-right:5px;" alt="">`;
-  const iconBath = `<img src="https://img.icons8.com/?size=100&id=11485&format=png&color=71717a"  width="13" height="13" style="vertical-align:middle;margin-right:5px;" alt="">`;
-  const iconCal = `<img src="https://img.icons8.com/?size=100&id=23&format=png&color=71717a"     width="13" height="13" style="vertical-align:middle;margin-right:5px;" alt="">`;
-  const iconNight = `<img src="https://img.icons8.com/?size=100&id=660&format=png&color=71717a"    width="13" height="13" style="vertical-align:middle;margin-right:5px;" alt="">`;
-  const iconGuest = `<img src="https://img.icons8.com/?size=100&id=fEZo4zNy3Mqa&format=png&color=71717a" width="13" height="13" style="vertical-align:middle;margin-right:5px;" alt="">`;
+  const iconPin   = `<img src="https://img.icons8.com/?size=100&id=3723&format=png&color=71717a"   width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
+  const iconBed   = `<img src="https://img.icons8.com/?size=100&id=7546&format=png&color=71717a"   width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
+  const iconBath  = `<img src="https://img.icons8.com/?size=100&id=11485&format=png&color=71717a"  width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
+  const iconCal   = `<img src="https://img.icons8.com/?size=100&id=23&format=png&color=71717a"     width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
+  const iconNight = `<img src="https://img.icons8.com/?size=100&id=660&format=png&color=71717a"    width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
+  const iconGuest = `<img src="https://img.icons8.com/?size=100&id=fEZo4zNy3Mqa&format=png&color=71717a" width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
 
-  const logo = pmLogoUrl
-    ? `<img src="${pmLogoUrl}" alt="${pmName}" style="max-height:44px;max-width:180px;object-fit:contain;">`
-    : `<span style="font-family:Inter,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#09090b;">VILLANET</span>`;
+  const logo = '<img src="https://imagenes-logos-villanet.s3.us-east-1.amazonaws.com/logo-villanet.png" alt="VillaNet" width="160" style="display:block;margin:0 auto;max-height:50px;width:auto;" border="0">';
 
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <!--[if mso]><noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript><![endif]-->
-  <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-    *{margin:0;padding:0;box-sizing:border-box;}
-    body{font-family:Inter,Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#09090b;background:#f4f4f5;}
-    .wrap{max-width:600px;margin:0 auto;}
-    /* header */
-    .hd{background:#fff;padding:36px 40px 28px;text-align:center;border-bottom:1px solid #e5e7eb;}
-    .hd-label{font-size:11px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#71717a;margin-bottom:20px;}
-    .hd h1{font-size:26px;font-weight:600;color:#09090b;line-height:1.2;margin:16px 0 10px;}
-    .hd p{font-size:14px;color:#52525b;line-height:1.6;}
-    /* trip info bar */
-    .trip{background:#fff;margin:0;padding:20px 40px;border-bottom:1px solid #e5e7eb;}
-    .trip-grid{display:table;width:100%;border-collapse:collapse;}
-    .trip-cell{display:table-cell;width:25%;padding:10px 12px;vertical-align:middle;font-size:13px;}
-    .trip-cell + .trip-cell{border-left:1px solid #e5e7eb;}
-    .trip-cell .tc-label{font-size:11px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:#71717a;margin-bottom:3px;}
-    .trip-cell .tc-val{font-weight:600;color:#09090b;font-size:13px;}
-    /* cards */
-    .content{padding:24px 40px 32px;}
-    .card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;margin-bottom:20px;}
-    .card-img{width:100%;height:220px;object-fit:cover;display:block;}
-    .card-body{padding:22px 24px 24px;}
-    .card-title{font-size:18px;font-weight:600;color:#09090b;margin-bottom:12px;line-height:1.3;}
-    .card-meta{margin-bottom:16px;}
-    .card-meta p{font-size:13px;color:#71717a;margin-bottom:5px;line-height:1.4;}
-    /* breakdown */
-    .bd{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:16px 18px;margin-bottom:18px;}
-    .bd-row{display:table;width:100%;padding:6px 0;}
-    .bd-row+.bd-row{border-top:1px solid #f0f0f0;}
-    .bd-label{display:table-cell;font-size:13px;color:#52525b;vertical-align:middle;}
-    .bd-val{display:table-cell;font-size:13px;font-weight:600;color:#09090b;text-align:right;vertical-align:middle;}
-    .bd-total .bd-label{font-weight:600;color:#09090b;font-size:14px;padding-top:10px;}
-    .bd-total .bd-val{font-size:16px;font-weight:700;color:#09090b;padding-top:10px;}
-    .bd-total{border-top:2px solid #e5e7eb !important;margin-top:4px;}
-    .disclaimer{font-size:11px;color:#a1a1aa;margin-top:10px;line-height:1.5;padding:0 2px;}
-    /* CTA button */
-    .btn-wrap{text-align:center;}
-    .btn{display:inline-block;background:#09090b;color:#ffffff !important;text-decoration:none;
-         font-size:13px;font-weight:600;letter-spacing:0.02em;padding:13px 28px;
-         border-radius:8px;width:100%;text-align:center;}
-    /* footer */
-    .ft{background:#fafafa;padding:28px 40px;text-align:center;border-top:1px solid #e5e7eb;}
-    .ft p{font-size:12px;color:#71717a;margin:4px 0;line-height:1.6;}
-    @media(max-width:600px){
-      .hd,.trip,.content,.ft{padding-left:20px;padding-right:20px;}
-      .trip-cell{display:block;width:100%;border-left:none !important;border-bottom:1px solid #e5e7eb;padding:8px 0;}
-      .card-img{height:180px;}
-    }
-  </style>
-</head>
-<body>
-<div class="wrap">
+  // ── Inline style constants (mantienen consistencia y sobreviven forward) ──
+  const S = {
+    body:        "margin:0;padding:0;background-color:#f4f4f5;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#09090b;",
+    outerTable:  "border-collapse:collapse;width:100%;background-color:#f4f4f5;",
+    wrap:        "width:600px;max-width:600px;",
 
-  <!-- Header -->
-  <div class="hd">
-    <div class="hd-label">${logo}</div>
-    <h1>Your Curated Villa Options</h1>
-    <p>${greeting}! ${intro}</p>
-  </div>
+    // Header
+    hdCell:      "background-color:#ffffff;padding:36px 40px 28px;text-align:center;border-bottom:1px solid #e5e7eb;",
+    hdLabel:     "font-size:11px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#71717a;margin:0 0 20px 0;",
+    hdH1:        "font-size:26px;font-weight:600;color:#09090b;line-height:1.2;margin:16px 0 10px 0;",
+    hdP:         "font-size:14px;color:#52525b;line-height:1.6;margin:0;",
 
-  <!-- Trip summary bar -->
-  <div class="trip">
-    <div class="trip-grid">
-      <div class="trip-cell">
-        <div class="tc-label">${iconCal} Check-in</div>
-        <div class="tc-val">${formatDate(checkInYmd)}</div>
-      </div>
-      <div class="trip-cell">
-        <div class="tc-label">${iconCal} Check-out</div>
-        <div class="tc-val">${formatDate(checkOutYmd)}</div>
-      </div>
-      <div class="trip-cell">
-        <div class="tc-label">${iconNight} Nights</div>
-        <div class="tc-val">${safeNights}</div>
-      </div>
-      ${quote.guests ? `<div class="trip-cell"><div class="tc-label">${iconGuest} Guests</div><div class="tc-val">${quote.guests}</div></div>` : ""}
-    </div>
-  </div>
+    // Trip bar
+    tripCell:    "background-color:#ffffff;padding:20px 40px;border-bottom:1px solid #e5e7eb;",
+    tcLabel:     "font-size:11px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:#71717a;margin:0 0 3px 0;",
+    tcVal:       "font-weight:600;color:#09090b;font-size:13px;margin:0;",
+    tripTd:      "width:25%;padding:10px 12px;vertical-align:middle;",
+    tripTdBorder:"width:25%;padding:10px 12px;vertical-align:middle;border-left:1px solid #e5e7eb;",
 
-  <!-- Villa cards -->
-  <div class="content">
-    ${items.map((item) => {
+    // Content wrapper
+    contentCell: "padding:24px 40px 32px;background-color:#f4f4f5;",
+
+    // Card
+    cardTable:   "border-collapse:collapse;width:100%;background-color:#ffffff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;margin-bottom:20px;",
+    cardImg:     "width:100%;height:220px;object-fit:cover;display:block;",
+    cardBodyTd:  "padding:22px 24px 24px;",
+    cardTitle:   "font-size:18px;font-weight:600;color:#09090b;margin:0 0 12px 0;line-height:1.3;",
+    cardMetaP:   "font-size:13px;color:#71717a;margin:0 0 5px 0;line-height:1.4;",
+
+    // Breakdown box
+    bdTable:     "border-collapse:collapse;width:100%;background-color:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:18px;",
+    bdTd:        "padding:16px 18px 0 18px;",
+    bdRowTable:  "border-collapse:collapse;width:100%;",
+    bdRow:       "border-top:1px solid #f0f0f0;",
+    bdLabel:     "font-size:13px;color:#52525b;padding:6px 0;vertical-align:middle;",
+    bdVal:       "font-size:13px;font-weight:600;color:#09090b;text-align:right;padding:6px 0;vertical-align:middle;",
+    bdTotalLabel:"font-size:14px;font-weight:600;color:#09090b;padding:10px 0 16px 0;vertical-align:middle;border-top:2px solid #e5e7eb;",
+    bdTotalVal:  "font-size:16px;font-weight:700;color:#09090b;text-align:right;padding:10px 0 16px 0;vertical-align:middle;border-top:2px solid #e5e7eb;",
+
+    // CTA Button
+btnTd:       "padding:0;text-align:center;background-color:#09090b;border-radius:8px;",
+btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;font-weight:600;letter-spacing:0.02em;padding:13px 28px;text-align:center;font-family:Arial,Helvetica,sans-serif;",
+
+    // Footer
+    ftCell:      "background-color:#fafafa;padding:28px 40px;text-align:center;border-top:1px solid #e5e7eb;",
+    ftP:         "font-size:12px;color:#71717a;margin:4px 0;line-height:1.6;",
+  };
+
+  // ── Trip bar cells ────────────────────────────────────────────────────────
+  const tripCells = [
+    { icon: iconCal,   label: "Check-in",  val: formatDate(checkInYmd) },
+    { icon: iconCal,   label: "Check-out", val: formatDate(checkOutYmd) },
+    { icon: iconNight, label: "Nights",    val: safeNights },
+    ...(quote.guests ? [{ icon: iconGuest, label: "Guests", val: quote.guests }] : []),
+  ];
+
+  const tripCellsHtml = tripCells
+    .map((c, i) => `
+      <td style="${i === 0 ? S.tripTd : S.tripTdBorder}">
+        <p style="${S.tcLabel}">${c.icon} ${c.label}</p>
+        <p style="${S.tcVal}">${c.val}</p>
+      </td>`)
+    .join("");
+
+  // ── Villa cards ───────────────────────────────────────────────────────────
+  const cardsHtml = items
+    .map((item) => {
       const b = item.breakdown;
       if (!b) return "";
 
-      // Generar filas de fees individuales
+      // Fee rows
       const feeRows = (() => {
         if (b.feeBreakdown?.length > 0) {
-          return b.feeBreakdown.filter(f => f.amount > 0).map(f => `
-            <div class="bd-row">
-              <span class="bd-label">${f.title}</span>
-              <span class="bd-val">${fmt(f.amount)}</span>
-            </div>`,
-              )
-              .join("");
-          }
-          if (b.otherFees > 0) {
-            return `<div class="bd-row"><span class="bd-label">Other Fees</span><span class="bd-val">${fmt(b.otherFees)}</span></div>`;
-          }
-          return "";
-        })();
+          return b.feeBreakdown
+            .filter((f) => f.amount > 0)
+            .map(
+              (f) => `
+              <tr style="${S.bdRow}">
+                <td style="${S.bdLabel}">${f.title}</td>
+                <td style="${S.bdVal}">${fmt(f.amount)}</td>
+              </tr>`
+            )
+            .join("");
+        }
+        if (b.otherFees > 0) {
+          return `
+            <tr style="${S.bdRow}">
+              <td style="${S.bdLabel}">Other Fees</td>
+              <td style="${S.bdVal}">${fmt(b.otherFees)}</td>
+            </tr>`;
+        }
+        return "";
+      })();
 
-      // Fila de Fees total (si hay fees)
-      const feesTotalRow = (Number(b.feesTotal) > 0) ? `
-      <div class="bd-row">
-        <span class="bd-label">Fees</span>
-        <span class="bd-val">${fmt(b.feesTotal)}</span>
-      </div>
-    ` : "";
+      const feesTotalRow =
+        Number(b.feesTotal) > 0
+          ? `<tr style="${S.bdRow}">
+               <td style="${S.bdLabel}">Fees</td>
+               <td style="${S.bdVal}">${fmt(b.feesTotal)}</td>
+             </tr>`
+          : "";
 
       return `
-    <div class="card">
-      ${item.image_url ? `<img src="${item.image_url}" class="card-img" alt="${item.listing_name || "Villa"}">` : ""}
-      <div class="card-body">
-        <div class="card-title">${item.listing_name || "Luxury Villa"}</div>
-        <div class="card-meta">
-          <p>${iconPin}${item.listing_location || ""}</p>
-          <p>${iconBed}${item.bedrooms} Bedrooms &nbsp;·&nbsp; ${iconBath}${item.bathrooms} Bathrooms</p>
-        </div>
+    <!--[if mso]><table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
+    <table cellpadding="0" cellspacing="0" border="0" style="${S.cardTable}">
+      ${
+        item.image_url
+          ? `<tr>
+               <td style="padding:0;line-height:0;">
+                 <img src="${item.image_url}" width="600" style="${S.cardImg}" alt="${item.listing_name || "Villa"}">
+               </td>
+             </tr>`
+          : ""
+      }
+      <tr>
+        <td style="${S.cardBodyTd}">
 
-        <div class="bd">
-          <div class="bd-row">
-            <span class="bd-label">Base Rate (${safeNights} night${safeNights !== 1 ? "s" : ""})</span>
-            <span class="bd-val">${fmt(b.base)}</span>
-          </div>
-          ${b.cleaning > 0 ? `<div class="bd-row"><span class="bd-label">Cleaning Fee</span><span class="bd-val">${fmt(b.cleaning)}</span></div>` : ""}
-          ${feesTotalRow}
-          ${feeRows}
-          ${b.taxes > 0 ? `<div class="bd-row"><span class="bd-label">Taxes</span><span class="bd-val">${fmt(b.taxes)}</span></div>` : ""}
-          
-          <!-- ✅ Total EXACTO del checkout (sin comisión) -->
-          <div class="bd-row bd-total">
-            <span class="bd-label">Total</span>
-            <span class="bd-val">${fmt(b.total)}</span>
-          </div>
-        </div>
+          <!-- Title -->
+          <p style="${S.cardTitle}">${item.listing_name || "Luxury Villa"}</p>
 
-        <div class="btn-wrap">
-          <a href="${item.guestyUrl}" class="btn">View Availability &amp; Book &rarr;</a>
-        </div>
-      </div>
-    </div>`;
-      })
-      .join("")}
-  </div>
+          <!-- Meta -->
+          <p style="${S.cardMetaP}">${iconPin}${item.listing_location || ""}</p>
+          <p style="${S.cardMetaP}">${iconBed}${item.bedrooms} Bedrooms &nbsp;&middot;&nbsp; ${iconBath}${item.bathrooms} Bathrooms</p>
 
-  <!-- Footer -->
-  <div class="ft">
-    <p>Book with Confidence. Earn with Trust.</p>
-    <p>This quote was generated by VillaNet — connecting you with the world's most vetted villas.</p>
-    ${!isGuest ? `<p>Questions? Reply to this email or contact your client directly.</p>` : `<p>Questions? Contact your travel advisor directly.</p>`}
-  </div>
+          <!-- Breakdown box -->
+          <table cellpadding="0" cellspacing="0" border="0" style="${S.bdTable}">
+            <tr>
+              <td style="${S.bdTd}">
+                <table cellpadding="0" cellspacing="0" border="0" style="${S.bdRowTable}">
+                  <!-- Base -->
+                  <tr>
+                    <td style="${S.bdLabel}">Base Rate (${safeNights} night${safeNights !== 1 ? "s" : ""})</td>
+                    <td style="${S.bdVal}">${fmt(b.base)}</td>
+                  </tr>
+                  ${
+                    b.cleaning > 0
+                      ? `<tr style="${S.bdRow}">
+                           <td style="${S.bdLabel}">Cleaning Fee</td>
+                           <td style="${S.bdVal}">${fmt(b.cleaning)}</td>
+                         </tr>`
+                      : ""
+                  }
+                  ${feesTotalRow}
+                  ${feeRows}
+                  ${
+                    b.taxes > 0
+                      ? `<tr style="${S.bdRow}">
+                           <td style="${S.bdLabel}">Taxes</td>
+                           <td style="${S.bdVal}">${fmt(b.taxes)}</td>
+                         </tr>`
+                      : ""
+                  }
+                  <!-- Total -->
+                  <tr>
+                    <td style="${S.bdTotalLabel}">Total</td>
+                    <td style="${S.bdTotalVal}">${fmt(b.total)}</td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
 
-</div>
-<!-- anti-preheader filler -->
-<div style="display:none;max-height:0;overflow:hidden;">${crypto.randomBytes(8).toString("hex")}</div>
-</body>
-</html>`;
-}
+          <!-- CTA Button -->
+          <table cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;">
+            <tr>
+              <!--[if mso]>
+              <td style="padding:0;background-color:#09090b;border-radius:8px;">
+                <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word"
+                  href="${item.guestyUrl}"
+                  style="height:46px;v-text-anchor:middle;width:504px;" arcsize="10%" stroke="f" fillcolor="#09090b">
+                  <w:anchorlock/>
+                  <center style="color:#ffffff;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;">
+                    View Photo Gallery &amp; Details &rarr;
+                  </center>
+                </v:roundrect>
+              </td>
+              <![endif]-->
+              <!--[if !mso]><!-->
+              <td style="padding:0;background-color:#09090b;border-radius:8px;">
+                <a href="${item.guestyUrl}" style="${S.btn}">
+                  View Photo Gallery &amp; Details &rarr;
+                </a>
+              </td>
+              <!--<![endif]-->
+            </tr>
+          </table>
+
+        </td>
+      </tr>
+    </table>
+    <!--[if mso]></td></tr></table><![endif]-->
+    <div style="height:20px;line-height:20px;font-size:20px;">&nbsp;</div>`;
+    })
+    .join("");
+
+    return `<!DOCTYPE html>
+    <html lang="en" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      <meta http-equiv="X-UA-Compatible" content="IE=edge">
+      <meta name="x-apple-disable-message-reformatting">
+      <!--[if mso]>
+      <noscript><xml>
+        <o:OfficeDocumentSettings>
+          <o:PixelsPerInch>96</o:PixelsPerInch>
+        </o:OfficeDocumentSettings>
+      </xml></noscript>
+      <![endif]-->
+      <title>Your Curated Villa Options</title>
+      <style>
+        /* RESET ONLY — no layout styles here (they'd be stripped on forward) */
+        body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+        table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+        img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
+        /* Responsive — survives forward better than layout styles */
+        @media only screen and (max-width: 620px) {
+          .wrap { width: 100% !important; max-width: 100% !important; }
+          .trip-td { display: block !important; width: 100% !important; border-left: none !important; border-bottom: 1px solid #e5e7eb !important; padding: 8px 0 !important; }
+          .card-img { height: 180px !important; }
+          .pad { padding-left: 20px !important; padding-right: 20px !important; }
+        }
+      </style>
+    </head>
+    <body style="${S.body}">
+    
+    <!-- Preheader (hidden) -->
+    <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">
+      Villa options for ${quote.guest_first_name} ${quote.guest_last_name} — ${formatDate(checkInYmd)} to ${formatDate(checkOutYmd)}
+      ${crypto.randomBytes(8).toString("hex")}
+    </div>
+    
+    <!-- Outer wrapper -->
+    <table cellpadding="0" cellspacing="0" border="0" role="presentation" style="${S.outerTable}">
+      <tr>
+        <td align="center" style="padding:24px 0;">
+    
+          <!-- Inner 600px container -->
+          <table cellpadding="0" cellspacing="0" border="0" role="presentation" class="wrap" style="${S.wrap}">
+    
+            <!-- ══ HEADER ══ -->
+            <tr>
+              <td class="pad" style="${S.hdCell}">
+                <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+                  <tr>
+                    <td style="padding:0;text-align:center;">
+                      ${logo}
+                    </td>
+                  </tr>
+                </table>
+                <h1 style="${S.hdH1}">Your Curated Villa Options</h1>
+                <p style="${S.hdP}">${greeting}! ${intro}</p>
+              </td>
+            </tr>
+    
+            <!-- ══ TRIP BAR ══ -->
+            <tr>
+              <td class="pad" style="${S.tripCell}">
+                <table cellpadding="0" cellspacing="0" border="0" role="presentation" style="border-collapse:collapse;width:100%;">
+                  <tr>
+                    ${tripCellsHtml}
+                  </tr>
+                </table>
+              </td>
+            </tr>
+    
+            <!-- ══ VILLA CARDS ══ -->
+            <tr>
+              <td class="pad" style="${S.contentCell}">
+                ${cardsHtml}
+              </td>
+            </tr>
+    
+            <!-- ══ FOOTER ══ -->
+            <tr>
+              <td class="pad" style="${S.ftCell}">
+                <p style="${S.ftP}">Book with Confidence. Earn with Trust.</p>
+                <p style="${S.ftP}">This quote was generated by VillaNet — connecting you with the world's most vetted villas.</p>
+                ${
+                  !isGuest
+                    ? `<p style="${S.ftP}">Questions? Reply to this email or contact your client directly.</p>`
+                    : `<p style="${S.ftP}">Questions? Contact your travel advisor directly.</p>`
+                }
+              </td>
+            </tr>
+    
+          </table>
+          <!-- /Inner container -->
+    
+        </td>
+      </tr>
+    </table>
+    <!-- /Outer wrapper -->
+    
+    </body>
+    </html>`;
+    }
 
 // ─── Additional controllers ───────────────────────────────────────────────────
 
