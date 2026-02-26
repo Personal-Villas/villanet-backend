@@ -44,10 +44,10 @@ function isCleaning(x) {
 
 export function extractGuestyPriceBreakdown(quoteData) {
   const money =
-  quoteData?.rates?.ratePlans?.[0]?.money?.money ||  
-  quoteData?.rates?.ratePlans?.[0]?.money ||         
-  quoteData?.money ||
-  {};
+    quoteData?.rates?.ratePlans?.[0]?.money?.money ||
+    quoteData?.rates?.ratePlans?.[0]?.money ||
+    quoteData?.money ||
+    {};
 
   const invoiceItems = money.invoiceItems || [];
 
@@ -80,11 +80,24 @@ export function extractGuestyPriceBreakdown(quoteData) {
 
   const feesTotal = feeBreakdown.reduce((s, f) => s + f.amount, 0);
 
-  const total =
-    Number(money.hostPayout) ||
+  // Prioridad para el total:
+  // 1. invoiceTotal / faresTotalAmount — total exacto del checkout que ve el cliente
+  // 2. Suma de todos los invoice items (sin redondeos intermedios)
+  // 3. hostPayout / money.total como último recurso (pueden diferir por redondeos)
+  const invoiceItemsSum = invoiceItems.reduce((s, x) => s + Number(x.amount || 0), 0);
+
+  const rawTotal =
+    Number(money.invoiceTotal) ||
+    Number(money.faresTotalAmount) ||
+    Number(money.totalAmount) ||
+    (invoiceItemsSum > 0 ? invoiceItemsSum : null) ||
     Number(money.total) ||
+    Number(money.hostPayout) ||
     Number(quoteData?.total) ||
     (base + feesTotal + taxes);
+
+  // Guesty redondea hacia arriba en su UI — aplicamos el mismo criterio
+  const total = Math.round(rawTotal);
 
   return {
     currency: money.currency || invoiceItems[0]?.currency || "USD",

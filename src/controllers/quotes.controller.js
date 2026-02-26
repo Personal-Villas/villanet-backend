@@ -853,6 +853,11 @@ function safeJson(x) {
   }
 }
 
+function clampPct(n) {
+  const x = Number(n);
+  return Number.isFinite(x) ? Math.max(0, Math.min(100, x)) : 0;
+}
+
 // ─── Guesty quote parsers ────────────────────────────────────────────────────
 
 function parseGuestyQuote(raw) {
@@ -902,7 +907,7 @@ export async function calculateQuote(req, res) {
       checkIn,
       checkOut,
       guestsCount,
-      source: "booking-engine",
+      source: "manual", // "manual" devuelve invoice items completos (fees incluidos)
     });
 
     const breakdown = extractGuestyPriceBreakdown(quote);
@@ -920,6 +925,8 @@ export async function calculateQuote(req, res) {
         taxes: money2(breakdown.taxes),
         feeBreakdown: breakdown.feeBreakdown,
         feesTotal: money2(breakdown.feesTotal),
+        // total = lo que el cliente paga en Guesty (igual que en sendQuoteEmail)
+        total: money2(breakdown.total),
         commissionPct,
         commission: money2(commission),
         totalGross: money2(totalGross),
@@ -934,7 +941,7 @@ export async function calculateQuote(req, res) {
     return res.status(502).json({
       ok: false,
       error: "guesty_quote_failed",
-      message: "No se pudo obtener cotización de Guesty",
+      message: "Could not retrieve a quote from Guesty",
     });
   }
 }
