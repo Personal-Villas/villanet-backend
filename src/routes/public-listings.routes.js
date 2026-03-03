@@ -31,6 +31,7 @@ r.get('/', async (req, res) => {
       sort = 'rank',
       availabilitySession = '',
       destination = '',
+      destinations = '', // comma-separated list from Quote Wizard multi-select
       guests = '', 
     } = req.query;
 
@@ -76,24 +77,35 @@ r.get('/', async (req, res) => {
     // Definimos searchTerm fuera de los IFs para que sea accesible en todo el scope de la ruta
     const searchTerm = q?.toString().trim() || '';
 
-    // 1. FILTRO DE DESTINO (ESTRICTO)
-    if (destination?.toString().trim()) {
-      const destValue = destination.toString().trim();
-      const isStBarts = destValue.toLowerCase().replace(/\./g, '') === 'St. Barts';
-      
-      // Si es St Barts, usamos el valor exacto con punto de la BD
-      const finalDest = isStBarts ? 'St. Barts' : destValue;
+    // 1. FILTRO DE DESTINO — soporta uno o múltiples destinos (OR entre ellos)
+    const destinationsList = destinations?.toString().trim()
+      ? destinations.toString().split(',').map(d => d.trim()).filter(Boolean)
+      : destination?.toString().trim()
+        ? [destination.toString().trim()]
+        : [];
 
-      params.push(finalDest);
-      const idx = params.length;
-
-      // Uso de = para evitar que St. Marteen se cuele en St. Barts
-      clauses.push(`(
-        l.villanet_destination_tag = $${idx} OR 
-        l.villanet_city = $${idx} OR 
-        l.city = $${idx} OR
-        l.country = $${idx}
-      )`);
+    if (destinationsList.length > 0) {
+      if (destinationsList.length === 1) {
+        // Un solo destino: comparación exacta para evitar falsos positivos (ej: St. Barts vs St. Martin)
+        params.push(destinationsList[0]);
+        const idx = params.length;
+        clauses.push(`(
+          l.villanet_destination_tag = $${idx} OR
+          l.villanet_city = $${idx} OR
+          l.city = $${idx} OR
+          l.country = $${idx}
+        )`);
+      } else {
+        // Múltiples destinos: OR entre todos usando = ANY(array)
+        params.push(destinationsList);
+        const idx = params.length;
+        clauses.push(`(
+          l.villanet_destination_tag = ANY($${idx}::text[]) OR
+          l.villanet_city = ANY($${idx}::text[]) OR
+          l.city = ANY($${idx}::text[]) OR
+          l.country = ANY($${idx}::text[])
+        )`);
+      }
     }
 
     // 2. FILTRO DE BÚSQUEDA GENERAL (Q)
@@ -131,7 +143,7 @@ r.get('/', async (req, res) => {
         if (mins.length) {
           const minBedrooms = Math.min(...mins);
           params.push(minBedrooms);
-          clauses.push(`l.bedrooms = $${params.length}`);
+          clauses.push(`l.bedrooms >= $${params.length}`);
         }
       }
     }
@@ -145,7 +157,7 @@ r.get('/', async (req, res) => {
       const ORs = [];
       if (nums.length) {
         params.push(nums);
-        ORs.push(`l.bathrooms = ANY($${params.length}::int[])`);
+        ORs.push(`l.bathrooms >= ANY($${params.length}::int[])`);
       }
       if (has12) ORs.push(`l.bathrooms >= 12`);
 

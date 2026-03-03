@@ -33,6 +33,7 @@ r.get("/", auth(false), async (req, res) => {
       sort = "rank",
       availabilitySession = "",
       destination = "",
+      destinations = "", // comma-separated from Quote Wizard multi-select
       guests = "",
     } = req.query;
 
@@ -80,25 +81,43 @@ r.get("/", auth(false), async (req, res) => {
     // Búsqueda unificada
     let searchTerm = "";
 
-    // 1. Lógica de Destino (Prioritaria y Estricta)
-    if (destination?.toString().trim()) {
-      searchTerm = destination.toString().trim();
-      // Normalizamos el input: quitamos puntos, pasamos a minúsculas y quitamos espacios extra
-      const cleanDest = destination.toString().trim().replace(/\./g, '').toLowerCase();
-      
-      params.push(`%${cleanDest}%`);
-      const idx = params.length;
+    // 1. FILTRO DE DESTINO — soporta uno o múltiples destinos (OR entre ellos)
+    const destinationsList = destinations?.toString().trim()
+      ? destinations.toString().split(',').map(d => d.trim()).filter(Boolean)
+      : destination?.toString().trim()
+        ? [destination.toString().trim()]
+        : [];
 
-      // COMPARACIÓN INTELIGENTE:
-      // Usamos REPLACE(columna, '.', '') para ignorar el punto de la BD temporalmente.
-      // Usamos unaccent() para ignorar tildes.
-      // Y lo más importante: NO BUSCAMOS EN l.description ni l.name para evitar falsos positivos.
-      clauses.push(`(
-        unaccent(LOWER(REPLACE(l.villanet_destination_tag, '.', ''))) ILIKE unaccent($${idx}) OR 
-        unaccent(LOWER(REPLACE(l.villanet_city, '.', ''))) ILIKE unaccent($${idx}) OR 
-        unaccent(LOWER(REPLACE(l.city, '.', ''))) ILIKE unaccent($${idx}) OR
-        unaccent(LOWER(REPLACE(l.country, '.', ''))) ILIKE unaccent($${idx})
-      )`);
+    if (destinationsList.length > 0) {
+      // Establecer searchTerm para compatibilidad con la búsqueda general posterior
+      searchTerm = destinationsList[0];
+
+      if (destinationsList.length === 1) {
+        // Un solo destino: ILIKE con normalización de puntos/tildes
+        const cleanDest = destinationsList[0].replace(/\./g, '').toLowerCase();
+        params.push(`%${cleanDest}%`);
+        const idx = params.length;
+        clauses.push(`(
+          unaccent(LOWER(REPLACE(l.villanet_destination_tag, '.', ''))) ILIKE unaccent($${idx}) OR
+          unaccent(LOWER(REPLACE(l.villanet_city, '.', ''))) ILIKE unaccent($${idx}) OR
+          unaccent(LOWER(REPLACE(l.city, '.', ''))) ILIKE unaccent($${idx}) OR
+          unaccent(LOWER(REPLACE(l.country, '.', ''))) ILIKE unaccent($${idx})
+        )`);
+      } else {
+        // Múltiples destinos: un OR por cada destino (cada uno con su ILIKE normalizado)
+        const destConditions = destinationsList.map(dest => {
+          const cleanDest = dest.replace(/\./g, '').toLowerCase();
+          params.push(`%${cleanDest}%`);
+          const idx = params.length;
+          return `(
+            unaccent(LOWER(REPLACE(l.villanet_destination_tag, '.', ''))) ILIKE unaccent($${idx}) OR
+            unaccent(LOWER(REPLACE(l.villanet_city, '.', ''))) ILIKE unaccent($${idx}) OR
+            unaccent(LOWER(REPLACE(l.city, '.', ''))) ILIKE unaccent($${idx}) OR
+            unaccent(LOWER(REPLACE(l.country, '.', ''))) ILIKE unaccent($${idx})
+          )`;
+        });
+        clauses.push(`(${destConditions.join(' OR ')})`);
+      }
 
     } else if (q?.toString().trim()) {
       searchTerm = q.toString().trim();
@@ -164,7 +183,7 @@ r.get("/", auth(false), async (req, res) => {
         if (mins.length) {
           const minBedrooms = Math.min(...mins);
           params.push(minBedrooms);
-          clauses.push(`l.bedrooms = $${params.length}`);
+          clauses.push(`l.bedrooms >= $${params.length}`);
         }
       }
     }
@@ -178,7 +197,7 @@ r.get("/", auth(false), async (req, res) => {
       const ORs = [];
       if (nums.length) {
         params.push(nums);
-        ORs.push(`l.bathrooms = ANY($${params.length}::int[])`);
+        ORs.push(`l.bathrooms >= ANY($${params.length}::int[])`);
       }
       if (has12) ORs.push(`l.bathrooms >= 12`);
 
