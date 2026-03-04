@@ -622,7 +622,7 @@ function normalizeResults(rows) {
     return {
       ...rest,
       rank: r.rank !== null ? Number(r.rank) : null,
-      images_json: Array.isArray(r.images_json) ? r.images_json : [],
+      images_json: Array.isArray(r.images_json) ? r.images_json.slice(0, 3) : [],
       heroImage:
         (Array.isArray(r.images_json) && r.images_json[0]) ||
         r.heroImage ||

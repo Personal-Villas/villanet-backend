@@ -727,7 +727,7 @@ function normalizeResults(rows) {
       images_json: Array.isArray(r.images_json)
         ? r.images_json.filter(
             (img) => img !== "Unknown" && img !== "Villas not verified",
-          )
+          ).slice(0, 3)
         : [],
 
       // 4. VERIFICACIÓN (Solo booleano, sin textos de advertencia)
