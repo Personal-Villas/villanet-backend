@@ -1,13 +1,12 @@
 import { Router } from 'express';
 import { pool } from '../db.js';
 import { cache } from '../cache.js';
-import { getAvailabilityFor } from '../services/availability.service.js';
 
 const r = Router();
 
 // ✅ Configuración OPTIMIZADA idéntica a la ruta protegida
 const AVAILABILITY_SESSION_TTL = 600000; // 10 minutos
-const LAZY_SCAN_CHUNK = 60;             // Candidatos por ciclo de escaneo
+const LAZY_SCAN_CHUNK = 120;             // Candidatos por ciclo de escaneo
 const AV_BATCH_SIZE = 15;               // Batch size reducido
 const AV_CONCURRENCY = 2;               // Máximo 2 consultas concurrentes
 
@@ -357,41 +356,12 @@ r.get('/', async (req, res) => {
       } else {
         session.cursor += candidateIds.length;
         
-        // 3️⃣ Verificar disponibilidad EN UN SOLO BATCH (sin loop infinito)
-        const availableInChunk = [];
-        
-        // Procesar en batches pequeños con concurrencia IDÉNTICA
-        for (let i = 0; i < candidateIds.length; i += AV_BATCH_SIZE * AV_CONCURRENCY) {
-          const batchPromises = [];
-          
-          for (let j = 0; j < AV_CONCURRENCY; j++) {
-            const startIdx = i + (j * AV_BATCH_SIZE);
-            if (startIdx >= candidateIds.length) break;
-            
-            const batchIds = candidateIds.slice(startIdx, startIdx + AV_BATCH_SIZE);
-            if (batchIds.length > 0) {
-              batchPromises.push(
-                getAvailabilityFor(batchIds, checkIn, checkOut)
-                  .then(batchResult => {
-                    return batchResult
-                      .filter(a => a.available)
-                      .map(a => a.listing_id);
-                  })
-                  .catch(err => {
-                    console.warn(`[Public FastScan] Batch failed:`, err.message);
-                    return [];
-                  })
-              );
-            }
-          }
-          
-          if (batchPromises.length > 0) {
-            const batchResults = await Promise.all(batchPromises);
-            batchResults.forEach(result => {
-              availableInChunk.push(...result);
-            });
-          }
-        }
+        // 3️⃣ Verificar disponibilidad desde caché local (CA1: sin llamadas a Guesty)
+        const availableInChunk = await checkAvailabilityFromCache(candidateIds, checkIn, checkOut)
+          .catch(err => {
+            console.warn(`[Public FastScan] Cache check failed:`, err.message);
+            return [];
+          });
         
         session.availableIds.push(...availableInChunk);
         console.log(`📊 [Public FastScan] Scanned ${candidateIds.length}, found ${availableInChunk.length} available (total: ${session.availableIds.length})`);
@@ -677,6 +647,49 @@ function normalizeResults(rows) {
       villanetResortVilla: normalizeBoolean(r.villanetResortVilla),
     };
   });
+}
+
+
+/**
+ * checkAvailabilityFromCache
+ * Reemplaza getAvailabilityFor() consultando listing_availability en DB.
+ * CA1: sin llamadas a Guesty. CA2: respuesta <1s. CA3: lógica correcta de CTA/CTD/minNights.
+ * CA4: propiedades sin datos en caché no aparecen.
+ *
+ * @param {string[]} candidateIds
+ * @param {string} checkIn  YYYY-MM-DD
+ * @param {string} checkOut YYYY-MM-DD
+ * @returns {Promise<string[]>} IDs disponibles
+ */
+async function checkAvailabilityFromCache(candidateIds, checkIn, checkOut) {
+  if (!candidateIds.length) return [];
+
+  const checkInDate  = new Date(checkIn);
+  const checkOutDate = new Date(checkOut);
+  const nights = Math.round((checkOutDate - checkInDate) / 86400000);
+  if (nights <= 0) return [];
+
+  const t0 = Date.now();
+
+  const { rows } = await pool.query(`
+    SELECT la.listing_id
+    FROM listing_availability la
+    WHERE la.listing_id = ANY($1::text[])
+      AND la.date >= $2
+      AND la.date < $3
+      AND la.available = true
+      AND la.cta = false
+      AND la.ctd = false
+    GROUP BY la.listing_id
+    HAVING
+      COUNT(*) = $4
+      AND MIN(CASE WHEN la.date = $2 THEN la.min_nights ELSE NULL END) <= $4
+  `, [candidateIds, checkIn, checkOut, nights]);
+
+  const ms = Date.now() - t0;
+  console.log(`⚡ [checkAvailabilityFromCache] ${rows.length}/${candidateIds.length} disponibles en ${ms}ms`);
+
+  return rows.map(r => r.listing_id);
 }
 
 export default r;
