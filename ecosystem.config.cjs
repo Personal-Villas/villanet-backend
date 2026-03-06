@@ -43,5 +43,36 @@ module.exports = {
         NODE_ENV: "production",
       },
     },
+
+    // ─── Cron incremental fees: cada 6 horas ─────────────────────────────────
+    // Solo re-sincroniza propiedades con fees vencidos (> 24hs) o con error.
+    {
+      name: "sync-fees-cron",
+      script: "./scripts/syncFees.js",
+      args: "",                          // sin --full → modo incremental
+      instances: 1,
+      autorestart: false,
+      cron_restart: "0 */6 * * *",       // cada 6 horas
+      watch: false,
+      env_production: {
+        NODE_ENV: "production",
+      },
+    },
+
+    // ─── Cron full sync fees: diario a las 4:00 AM ───────────────────────────
+    // Corre 1 hora después del full sync de availability (3 AM).
+    // Fuerza resync completo de fees de todas las propiedades habilitadas.
+    {
+      name: "sync-fees-full",
+      script: "./scripts/syncFees.js",
+      args: "--full",
+      instances: 1,
+      autorestart: false,
+      cron_restart: "0 4 * * *",         // 4:00 AM todos los días
+      watch: false,
+      env_production: {
+        NODE_ENV: "production",
+      },
+    },
   ],
 };

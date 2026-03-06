@@ -907,7 +907,7 @@ export async function calculateQuote(req, res) {
       checkIn,
       checkOut,
       guestsCount,
-      source: "booking-engine",
+      source: "manual",
     });
 
     const breakdown = extractGuestyPriceBreakdown(quote);
@@ -925,6 +925,7 @@ export async function calculateQuote(req, res) {
         taxes: money2(breakdown.taxes),
         feeBreakdown: breakdown.feeBreakdown,
         feesTotal: money2(breakdown.feesTotal),
+        total: money2(breakdown.total),
         commissionPct,
         commission: money2(commission),
         totalGross: money2(totalGross),
