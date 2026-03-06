@@ -74,5 +74,21 @@ module.exports = {
         NODE_ENV: "production",
       },
     },
+
+    // ─── Cron Guardian: lunes y miércoles a las 8:00 AM ──────────────────────
+    // Audita y limpia datos según reglas del guardian service.
+    // Corre después del peak de sync (3-4 AM) para operar sobre datos frescos.
+    {
+      name: "guardian-cron",
+      script: "./scripts/guardian.cron.js",
+      args: "",
+      instances: 1,
+      autorestart: false,                // no reiniciar si el proceso cae
+      cron_restart: "0 8 * * 1,3",       // lunes y miércoles a las 8:00 AM
+      watch: false,
+      env_production: {
+        NODE_ENV: "production",
+      },
+    },
   ],
 };
