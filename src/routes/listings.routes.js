@@ -288,7 +288,7 @@ r.get("/", auth(false), async (req, res) => {
           l.villanet_heated_pool AS "villanetHeatedPool",
 
           COALESCE(l.hero_image_url, '') AS "heroImage",
-          COALESCE(l.villanet_hero_images, '[]'::jsonb) AS images_json,
+          COALESCE(l.images_json, '[]'::jsonb) AS images_json,
           l.updated_at
         FROM listings l
         ${whereSQL}
@@ -381,45 +381,53 @@ r.get("/", auth(false), async (req, res) => {
 
     const { session, sessionId, isNew } = await ensureAvailabilitySession();
 
-    // 🔥 ESTRATEGIA IDÉNTICA: Fast Scan optimizado
+    // 🔥 ESTRATEGIA: Full Scan — escanear hasta tener lim resultados o agotar candidatos
     if (isNew || session.availableIds.length < neededEnd) {
       console.log(
-        `🔍 [Privado FastScan] Session ${sessionId.slice(0, 12)}: needed ${neededEnd}, have ${session.availableIds.length}`,
+        `🔍 [Privado FullScan] Session ${sessionId.slice(0, 12)}: needed ${neededEnd}, have ${session.availableIds.length}`,
       );
 
-      // 1️⃣ Calcular cuánto necesitamos escanear
-      const scanTarget = Math.min(
-        neededEnd - session.availableIds.length + 10, // +10 de buffer
-        LAZY_SCAN_CHUNK,
-      );
+      const SCAN_TIMEOUT_MS = 5000;
+      const scanStart = Date.now();
 
-      // 2️⃣ Traer candidatos SOLO para esta página
-      const idsSQL = `
-        SELECT l.listing_id AS id
-        FROM listings l
-        ${session.whereSQL}
-        ${session.orderSQL}
-        LIMIT ${scanTarget} OFFSET ${session.cursor};
-      `;
+      // Loop: seguir escaneando hasta tener suficientes IDs, agotar candidatos o cumplir timeout
+      while (session.availableIds.length < neededEnd && !session.exhausted) {
+        if (Date.now() - scanStart > SCAN_TIMEOUT_MS) {
+          console.warn(
+            `⏱️ [Privado FullScan] Timeout alcanzado tras ${SCAN_TIMEOUT_MS}ms. Respondiendo con ${session.availableIds.length} resultados.`,
+          );
+          break;
+        }
 
-      const idsRes = await pool.query(idsSQL, session.params);
-      const candidateIds = idsRes.rows.map((r) => r.id);
+        // 1️⃣ Traer siguiente chunk de candidatos
+        const idsSQL = `
+          SELECT l.listing_id AS id
+          FROM listings l
+          ${session.whereSQL}
+          ${session.orderSQL}
+          LIMIT ${LAZY_SCAN_CHUNK} OFFSET ${session.cursor};
+        `;
 
-      if (candidateIds.length === 0) {
-        session.exhausted = true;
-      } else {
+        const idsRes = await pool.query(idsSQL, session.params);
+        const candidateIds = idsRes.rows.map((r) => r.id);
+
+        if (candidateIds.length === 0) {
+          session.exhausted = true;
+          break;
+        }
+
         session.cursor += candidateIds.length;
 
-        // 3️⃣ Verificar disponibilidad desde caché local (CA1: sin llamadas a Guesty)
+        // 2️⃣ Verificar disponibilidad desde caché local (CA1: sin llamadas a Guesty)
         const availableInChunk = await checkAvailabilityFromCache(candidateIds, checkIn, checkOut)
           .catch((err) => {
-            console.warn(`[Privado FastScan] Cache check failed:`, err.message);
+            console.warn(`[Privado FullScan] Cache check failed:`, err.message);
             return [];
           });
 
         session.availableIds.push(...availableInChunk);
         console.log(
-          `📊 [Privado FastScan] Scanned ${candidateIds.length}, found ${availableInChunk.length} available (total: ${session.availableIds.length})`,
+          `📊 [Privado FullScan] Scanned ${candidateIds.length}, found ${availableInChunk.length} available (total: ${session.availableIds.length}/${neededEnd} needed)`,
         );
       }
 
@@ -432,7 +440,7 @@ r.get("/", auth(false), async (req, res) => {
       );
     }
 
-    // 4️⃣ DEVOLVER LO QUE TENGAMOS AHORA (aunque sea menos de lo pedido)
+    // 4️⃣ DEVOLVER PÁGINA COMPLETA (o lo que haya si exhausted/timeout)
     const pageIds = session.availableIds.slice(offset, offset + lim);
     const detailRows = await fetchDetails(
       pageIds,
@@ -448,7 +456,7 @@ r.get("/", auth(false), async (req, res) => {
       !session.exhausted || nextCursor < session.availableIds.length;
 
     console.log(
-      `✅ [Privado FastScan] Returning ${returned}/${lim} items, cursor ${cursorPos}→${nextCursor}, hasMore: ${hasMore}`,
+      `✅ [Privado FullScan] Returning ${returned}/${lim} items, cursor ${cursorPos}→${nextCursor}, exhausted: ${session.exhausted}, hasMore: ${hasMore}`,
     );
 
     return res.json({
@@ -651,7 +659,7 @@ async function fetchDetails(
       l.villanet_heated_pool AS "villanetHeatedPool",
 
       COALESCE(l.hero_image_url, '') AS "heroImage",
-      COALESCE(l.villanet_hero_images, '[]'::jsonb) AS images_json,
+      COALESCE(l.images_json, '[]'::jsonb) AS images_json,
       l.updated_at,
       oi.ordinality
     FROM ordered_ids oi
