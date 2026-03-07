@@ -74,6 +74,11 @@ function generateCode() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
+// 🔒 Idempotency map: evita que requests simultáneos generen dos códigos distintos
+// (doble click, WhatsApp scraper, proxies de carrier, etc.)
+const IDEMPOTENCY_WINDOW_MS = 30 * 1000; // 30 segundos
+const pendingSendCode = new Map();
+
 // Enviar email con código
 async function sendVerificationEmail(email, code) {
   const mailOptions = {
@@ -120,6 +125,19 @@ export const AuthController = {
     if (!email) return res.status(400).json({ message: 'Email required' });
 
     const normalizedEmail = String(email).toLowerCase().trim();
+
+    // 🔒 Idempotency check: si ya hay un código generado en los últimos 30s para
+    // este email, devolver la misma respuesta sin generar ni enviar nada nuevo.
+    // Esto cubre: doble click, WhatsApp link preview, proxies de carrier con doble request.
+    const cached = pendingSendCode.get(normalizedEmail);
+    if (cached && Date.now() < cached.windowExpiresAt) {
+      console.log(`⚡ Idempotency hit for ${normalizedEmail} — returning cached response`);
+      return res.json({
+        message: 'Verification code sent',
+        userExists: cached.userExists
+      });
+    }
+
     const code = generateCode();
     const codeHash = hashCode(code);
 
@@ -158,14 +176,22 @@ export const AuthController = {
 
       await sendVerificationEmail(normalizedEmail, code);
 
-      // NUEVO: Notificación Discord (non-blocking)
-    notifySafely(() => 
-      sendAccessNotification({
-        email: normalizedEmail,
+      // 🔒 Guardar en idempotency map por 30 segundos
+      pendingSendCode.set(normalizedEmail, {
         userExists: exists,
-        timestamp: new Date()
-      })
-    );
+        windowExpiresAt: Date.now() + IDEMPOTENCY_WINDOW_MS
+      });
+      // Auto-limpiar para no acumular memoria
+      setTimeout(() => pendingSendCode.delete(normalizedEmail), IDEMPOTENCY_WINDOW_MS);
+
+      // Notificación Discord (non-blocking)
+      notifySafely(() => 
+        sendAccessNotification({
+          email: normalizedEmail,
+          userExists: exists,
+          timestamp: new Date()
+        })
+      );
 
       console.log(`✅ Code sent successfully to ${normalizedEmail}`);
 
