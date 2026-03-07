@@ -288,7 +288,7 @@ r.get("/", auth(false), async (req, res) => {
           l.villanet_heated_pool AS "villanetHeatedPool",
 
           COALESCE(l.hero_image_url, '') AS "heroImage",
-          COALESCE(l.images_json, '[]'::jsonb) AS images_json,
+          COALESCE(l.villanet_hero_images, '[]'::jsonb) AS images_json,
           l.updated_at
         FROM listings l
         ${whereSQL}
@@ -651,7 +651,7 @@ async function fetchDetails(
       l.villanet_heated_pool AS "villanetHeatedPool",
 
       COALESCE(l.hero_image_url, '') AS "heroImage",
-      COALESCE(l.images_json, '[]'::jsonb) AS images_json,
+      COALESCE(l.villanet_hero_images, '[]'::jsonb) AS images_json,
       l.updated_at,
       oi.ordinality
     FROM ordered_ids oi
