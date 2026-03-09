@@ -82,14 +82,14 @@ r.get("/", auth(false), async (req, res) => {
 
     // 1. FILTRO DE DESTINO — soporta uno o múltiples destinos (OR entre ellos)
     const destinationsList = destinations?.toString().trim()
-      ? destinations.toString().split(',').map(d => d.trim()).filter(Boolean)
+      ? destinations.toString().split('|').map(d => d.trim()).filter(Boolean)
       : destination?.toString().trim()
         ? [destination.toString().trim()]
         : [];
 
     if (destinationsList.length > 0) {
-      // Establecer searchTerm para compatibilidad con la búsqueda general posterior
-      searchTerm = destinationsList[0];
+      // ✅ NO asignar searchTerm aquí — evita que se agregue un segundo filtro AND
+      // que convertiría el OR de destinos en un AND (bug: solo mostraba el primer destino)
 
       if (destinationsList.length === 1) {
         // Un solo destino: ILIKE con normalización de puntos/tildes
@@ -137,21 +137,7 @@ r.get("/", auth(false), async (req, res) => {
       )`);
     }
 
-    if (searchTerm) {
-      const searchLower = `%${searchTerm.toLowerCase()}%`;
-      params.push(searchLower);
-      const idx = params.length;
-
-      clauses.push(`(
-        LOWER(l.name) ILIKE $${idx} OR 
-        LOWER(l.villanet_destination_tag) ILIKE $${idx} OR 
-        LOWER(l.villanet_city) ILIKE $${idx} OR
-        LOWER(l.city) ILIKE $${idx} OR
-        LOWER(l.country) ILIKE $${idx} OR
-        LOWER(l.location_text) ILIKE $${idx} OR
-        LOWER(l.description) ILIKE $${idx}
-      )`);
-    }
+    // (búsqueda libre solo aplica cuando no hay destinos ni query activos)
 
     // Filtro por badges
     const badgeSlugs = badges.split(",").filter(Boolean);
@@ -811,7 +797,9 @@ async function checkAvailabilityFromCache(candidateIds, checkIn, checkOut) {
   const ms = Date.now() - t0;
   console.log(`⚡ [checkAvailabilityFromCache] ${rows.length}/${candidateIds.length} disponibles en ${ms}ms`);
 
-  return rows.map(r => r.listing_id);
+  // ✅ Preservar el orden original de candidateIds (la query SQL no garantiza orden)
+  const availableSet = new Set(rows.map(r => r.listing_id));
+  return candidateIds.filter(id => availableSet.has(id));
 }
 
 export default r;
