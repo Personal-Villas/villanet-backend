@@ -67,7 +67,7 @@ function createDeferred() {
 /* =========================
  * Fechas
  * ========================= */
-function ymd(input) {
+export function ymd(input) {
   if (!input) return null;
 
   try {
@@ -320,7 +320,7 @@ async function fetchWithRetry(url, tries = MAX_RETRIES) {
   throw lastErr;
 }
 
-async function fetchBatch(ids, from, to, opts = {}) {
+export async function fetchBatch(ids, from, to, opts = {}) {
   if (!Array.isArray(ids) || ids.length === 0) throw new Error('IDs must be a non-empty array');
   if (!isValidDate(from) || !isValidDate(to)) throw new Error('Invalid date range');
 
@@ -336,7 +336,7 @@ async function fetchBatch(ids, from, to, opts = {}) {
   queryParts.push(`endDate=${encodeURIComponent(to)}`);
 
   const url = `/v1/availability-pricing/api/calendar/listings?${queryParts.join('&')}`;
-
+  
   const response = await fetchWithRetry(url, MAX_RETRIES);
   
   return normalizeCalendarResponse(response.data, from, to, opts);

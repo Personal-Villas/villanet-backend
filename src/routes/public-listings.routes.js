@@ -1,13 +1,12 @@
 import { Router } from 'express';
 import { pool } from '../db.js';
 import { cache } from '../cache.js';
-import { getAvailabilityFor } from '../services/availability.service.js';
 
 const r = Router();
 
 // ✅ Configuración OPTIMIZADA idéntica a la ruta protegida
 const AVAILABILITY_SESSION_TTL = 600000; // 10 minutos
-const LAZY_SCAN_CHUNK = 60;             // Candidatos por ciclo de escaneo
+const LAZY_SCAN_CHUNK = 120;             // Candidatos por ciclo de escaneo
 const AV_BATCH_SIZE = 15;               // Batch size reducido
 const AV_CONCURRENCY = 2;               // Máximo 2 consultas concurrentes
 
@@ -31,6 +30,7 @@ r.get('/', async (req, res) => {
       sort = 'rank',
       availabilitySession = '',
       destination = '',
+      destinations = '', // comma-separated list from Quote Wizard multi-select
       guests = '', 
     } = req.query;
 
@@ -76,24 +76,35 @@ r.get('/', async (req, res) => {
     // Definimos searchTerm fuera de los IFs para que sea accesible en todo el scope de la ruta
     const searchTerm = q?.toString().trim() || '';
 
-    // 1. FILTRO DE DESTINO (ESTRICTO)
-    if (destination?.toString().trim()) {
-      const destValue = destination.toString().trim();
-      const isStBarts = destValue.toLowerCase().replace(/\./g, '') === 'St. Barts';
-      
-      // Si es St Barts, usamos el valor exacto con punto de la BD
-      const finalDest = isStBarts ? 'St. Barts' : destValue;
+    // 1. FILTRO DE DESTINO — soporta uno o múltiples destinos (OR entre ellos)
+    const destinationsList = destinations?.toString().trim()
+      ? destinations.toString().split('|').map(d => d.trim()).filter(Boolean)
+      : destination?.toString().trim()
+        ? [destination.toString().trim()]
+        : [];
 
-      params.push(finalDest);
-      const idx = params.length;
-
-      // Uso de = para evitar que St. Marteen se cuele en St. Barts
-      clauses.push(`(
-        l.villanet_destination_tag = $${idx} OR 
-        l.villanet_city = $${idx} OR 
-        l.city = $${idx} OR
-        l.country = $${idx}
-      )`);
+    if (destinationsList.length > 0) {
+      if (destinationsList.length === 1) {
+        // Un solo destino: comparación exacta para evitar falsos positivos (ej: St. Barts vs St. Martin)
+        params.push(destinationsList[0]);
+        const idx = params.length;
+        clauses.push(`(
+          l.villanet_destination_tag = $${idx} OR
+          l.villanet_city = $${idx} OR
+          l.city = $${idx} OR
+          l.country = $${idx}
+        )`);
+      } else {
+        // Múltiples destinos: OR entre todos usando = ANY(array)
+        params.push(destinationsList);
+        const idx = params.length;
+        clauses.push(`(
+          l.villanet_destination_tag = ANY($${idx}::text[]) OR
+          l.villanet_city = ANY($${idx}::text[]) OR
+          l.city = ANY($${idx}::text[]) OR
+          l.country = ANY($${idx}::text[])
+        )`);
+      }
     }
 
     // 2. FILTRO DE BÚSQUEDA GENERAL (Q)
@@ -131,7 +142,7 @@ r.get('/', async (req, res) => {
         if (mins.length) {
           const minBedrooms = Math.min(...mins);
           params.push(minBedrooms);
-          clauses.push(`l.bedrooms = $${params.length}`);
+          clauses.push(`l.bedrooms >= $${params.length}`);
         }
       }
     }
@@ -145,7 +156,7 @@ r.get('/', async (req, res) => {
       const ORs = [];
       if (nums.length) {
         params.push(nums);
-        ORs.push(`l.bathrooms = ANY($${params.length}::int[])`);
+        ORs.push(`l.bathrooms >= ANY($${params.length}::int[])`);
       }
       if (has12) ORs.push(`l.bathrooms >= 12`);
 
@@ -318,79 +329,56 @@ r.get('/', async (req, res) => {
 
     const { session, sessionId, isNew } = await ensureAvailabilitySession();
 
-    // 🔥 ESTRATEGIA IDÉNTICA: Fast Scan optimizado
+    // 🔥 ESTRATEGIA: Full Scan — escanear hasta tener lim resultados o agotar candidatos
     if (isNew || session.availableIds.length < neededEnd) {
-      console.log(`🔍 [Public FastScan] Session ${sessionId.slice(0, 12)}: needed ${neededEnd}, have ${session.availableIds.length}`);
-      
-      // 1️⃣ Calcular cuánto necesitamos escanear
-      const scanTarget = Math.min(
-        neededEnd - session.availableIds.length + 10, // +10 de buffer
-        LAZY_SCAN_CHUNK
-      );
-      
-      // 2️⃣ Traer candidatos SOLO para esta página
-      const idsSQL = `
-        SELECT l.listing_id AS id
-        FROM listings l
-        ${session.whereSQL}
-        ${session.orderSQL}
-        LIMIT ${scanTarget} OFFSET ${session.cursor};
-      `;
-      
-      const idsRes = await pool.query(idsSQL, session.params);
-      const candidateIds = idsRes.rows.map(r => r.id);
-      
-      if (candidateIds.length === 0) {
-        session.exhausted = true;
-      } else {
-        session.cursor += candidateIds.length;
-        
-        // 3️⃣ Verificar disponibilidad EN UN SOLO BATCH (sin loop infinito)
-        const availableInChunk = [];
-        
-        // Procesar en batches pequeños con concurrencia IDÉNTICA
-        for (let i = 0; i < candidateIds.length; i += AV_BATCH_SIZE * AV_CONCURRENCY) {
-          const batchPromises = [];
-          
-          for (let j = 0; j < AV_CONCURRENCY; j++) {
-            const startIdx = i + (j * AV_BATCH_SIZE);
-            if (startIdx >= candidateIds.length) break;
-            
-            const batchIds = candidateIds.slice(startIdx, startIdx + AV_BATCH_SIZE);
-            if (batchIds.length > 0) {
-              batchPromises.push(
-                getAvailabilityFor(batchIds, checkIn, checkOut)
-                  .then(batchResult => {
-                    return batchResult
-                      .filter(a => a.available)
-                      .map(a => a.listing_id);
-                  })
-                  .catch(err => {
-                    console.warn(`[Public FastScan] Batch failed:`, err.message);
-                    return [];
-                  })
-              );
-            }
-          }
-          
-          if (batchPromises.length > 0) {
-            const batchResults = await Promise.all(batchPromises);
-            batchResults.forEach(result => {
-              availableInChunk.push(...result);
-            });
-          }
+      console.log(`🔍 [Public FullScan] Session ${sessionId.slice(0, 12)}: needed ${neededEnd}, have ${session.availableIds.length}`);
+
+      const SCAN_TIMEOUT_MS = 5000;
+      const scanStart = Date.now();
+
+      // Loop: seguir escaneando hasta tener suficientes IDs, agotar candidatos o cumplir timeout
+      while (session.availableIds.length < neededEnd && !session.exhausted) {
+        if (Date.now() - scanStart > SCAN_TIMEOUT_MS) {
+          console.warn(`⏱️ [Public FullScan] Timeout alcanzado tras ${SCAN_TIMEOUT_MS}ms. Respondiendo con ${session.availableIds.length} resultados.`);
+          break;
         }
-        
+
+        // 1️⃣ Traer siguiente chunk de candidatos
+        const idsSQL = `
+          SELECT l.listing_id AS id
+          FROM listings l
+          ${session.whereSQL}
+          ${session.orderSQL}
+          LIMIT ${LAZY_SCAN_CHUNK} OFFSET ${session.cursor};
+        `;
+
+        const idsRes = await pool.query(idsSQL, session.params);
+        const candidateIds = idsRes.rows.map(r => r.id);
+
+        if (candidateIds.length === 0) {
+          session.exhausted = true;
+          break;
+        }
+
+        session.cursor += candidateIds.length;
+
+        // 2️⃣ Verificar disponibilidad desde caché local (CA1: sin llamadas a Guesty)
+        const availableInChunk = await checkAvailabilityFromCache(candidateIds, checkIn, checkOut)
+          .catch(err => {
+            console.warn(`[Public FullScan] Cache check failed:`, err.message);
+            return [];
+          });
+
         session.availableIds.push(...availableInChunk);
-        console.log(`📊 [Public FastScan] Scanned ${candidateIds.length}, found ${availableInChunk.length} available (total: ${session.availableIds.length})`);
+        console.log(`📊 [Public FullScan] Scanned ${candidateIds.length}, found ${availableInChunk.length} available (total: ${session.availableIds.length}/${neededEnd} needed)`);
       }
-      
+
       // Actualizar sesión
       session.lastAccessed = Date.now();
       cache.set(`public_availability:${sessionId}`, session, AVAILABILITY_SESSION_TTL);
     }
 
-    // 4️⃣ DEVOLVER LO QUE TENGAMOS AHORA (aunque sea menos de lo pedido)
+    // 4️⃣ DEVOLVER PÁGINA COMPLETA (o lo que haya si exhausted/timeout)
     const pageIds = session.availableIds.slice(offset, offset + lim);
     const detailRows = await fetchDetails(pageIds, badgeSlugs, VILLANET_BADGE_FIELD_MAP);
 
@@ -400,7 +388,7 @@ r.get('/', async (req, res) => {
     // hasMore si NO está exhausto O si hay más IDs acumulados
     const hasMore = !session.exhausted || nextCursor < session.availableIds.length;
 
-    console.log(`✅ [Public FastScan] Returning ${returned}/${lim} items, cursor ${cursorPos}→${nextCursor}, hasMore: ${hasMore}`);
+    console.log(`✅ [Public FullScan] Returning ${returned}/${lim} items, cursor ${cursorPos}→${nextCursor}, exhausted: ${session.exhausted}, hasMore: ${hasMore}`);
 
     return res.json({
       results: normalizeResults(detailRows),
@@ -640,7 +628,7 @@ function normalizeResults(rows) {
     return {
       ...rest,
       rank: r.rank !== null ? Number(r.rank) : null,
-      images_json: Array.isArray(r.images_json) ? r.images_json : [],
+      images_json: Array.isArray(r.images_json) ? r.images_json.slice(0, 3) : [],
       heroImage:
         (Array.isArray(r.images_json) && r.images_json[0]) ||
         r.heroImage ||
@@ -665,6 +653,49 @@ function normalizeResults(rows) {
       villanetResortVilla: normalizeBoolean(r.villanetResortVilla),
     };
   });
+}
+
+
+/**
+ * checkAvailabilityFromCache
+ * Reemplaza getAvailabilityFor() consultando listing_availability en DB.
+ * CA1: sin llamadas a Guesty. CA2: respuesta <1s. CA3: lógica correcta de CTA/CTD/minNights.
+ * CA4: propiedades sin datos en caché no aparecen.
+ *
+ * @param {string[]} candidateIds
+ * @param {string} checkIn  YYYY-MM-DD
+ * @param {string} checkOut YYYY-MM-DD
+ * @returns {Promise<string[]>} IDs disponibles
+ */
+async function checkAvailabilityFromCache(candidateIds, checkIn, checkOut) {
+  if (!candidateIds.length) return [];
+
+  const checkInDate  = new Date(checkIn);
+  const checkOutDate = new Date(checkOut);
+  const nights = Math.round((checkOutDate - checkInDate) / 86400000);
+  if (nights <= 0) return [];
+
+  const t0 = Date.now();
+
+  const { rows } = await pool.query(`
+    SELECT la.listing_id
+    FROM listing_availability la
+    WHERE la.listing_id = ANY($1::text[])
+      AND la.date >= $2
+      AND la.date < $3
+      AND la.available = true
+      AND la.cta = false
+      AND la.ctd = false
+    GROUP BY la.listing_id
+    HAVING
+      COUNT(*) = $4
+      AND MIN(CASE WHEN la.date = $2 THEN la.min_nights ELSE NULL END) <= $4
+  `, [candidateIds, checkIn, checkOut, nights]);
+
+  const ms = Date.now() - t0;
+  console.log(`⚡ [checkAvailabilityFromCache] ${rows.length}/${candidateIds.length} disponibles en ${ms}ms`);
+
+  return rows.map(r => r.listing_id);
 }
 
 export default r;

@@ -974,6 +974,11 @@ function sumByPred(items, pred) {
   return total;
 }
 
+function clampPct(n) {
+  const x = Number(n);
+  return Number.isFinite(x) ? Math.max(0, Math.min(100, x)) : 0;
+}
+
 function safeJson(x) {
   try {
     return JSON.stringify(x, null, 2);
