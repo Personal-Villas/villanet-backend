@@ -78,7 +78,7 @@ r.get('/', async (req, res) => {
 
     // 1. FILTRO DE DESTINO — soporta uno o múltiples destinos (OR entre ellos)
     const destinationsList = destinations?.toString().trim()
-      ? destinations.toString().split(',').map(d => d.trim()).filter(Boolean)
+      ? destinations.toString().split('|').map(d => d.trim()).filter(Boolean)
       : destination?.toString().trim()
         ? [destination.toString().trim()]
         : [];

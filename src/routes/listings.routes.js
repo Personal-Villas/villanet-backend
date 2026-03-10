@@ -88,34 +88,26 @@ r.get("/", auth(false), async (req, res) => {
         : [];
 
     if (destinationsList.length > 0) {
-      // ✅ NO asignar searchTerm aquí — evita que se agregue un segundo filtro AND
-      // que convertiría el OR de destinos en un AND (bug: solo mostraba el primer destino)
-
       if (destinationsList.length === 1) {
-        // Un solo destino: ILIKE con normalización de puntos/tildes
-        const cleanDest = destinationsList[0].replace(/\./g, '').toLowerCase();
-        params.push(`%${cleanDest}%`);
+        // Un solo destino: comparación exacta para evitar falsos positivos
+        params.push(destinationsList[0]);
         const idx = params.length;
         clauses.push(`(
-          unaccent(LOWER(REPLACE(l.villanet_destination_tag, '.', ''))) ILIKE unaccent($${idx}) OR
-          unaccent(LOWER(REPLACE(l.villanet_city, '.', ''))) ILIKE unaccent($${idx}) OR
-          unaccent(LOWER(REPLACE(l.city, '.', ''))) ILIKE unaccent($${idx}) OR
-          unaccent(LOWER(REPLACE(l.country, '.', ''))) ILIKE unaccent($${idx})
+          l.villanet_destination_tag = $${idx} OR
+          l.villanet_city = $${idx} OR
+          l.city = $${idx} OR
+          l.country = $${idx}
         )`);
       } else {
-        // Múltiples destinos: un OR por cada destino (cada uno con su ILIKE normalizado)
-        const destConditions = destinationsList.map(dest => {
-          const cleanDest = dest.replace(/\./g, '').toLowerCase();
-          params.push(`%${cleanDest}%`);
-          const idx = params.length;
-          return `(
-            unaccent(LOWER(REPLACE(l.villanet_destination_tag, '.', ''))) ILIKE unaccent($${idx}) OR
-            unaccent(LOWER(REPLACE(l.villanet_city, '.', ''))) ILIKE unaccent($${idx}) OR
-            unaccent(LOWER(REPLACE(l.city, '.', ''))) ILIKE unaccent($${idx}) OR
-            unaccent(LOWER(REPLACE(l.country, '.', ''))) ILIKE unaccent($${idx})
-          )`;
-        });
-        clauses.push(`(${destConditions.join(' OR ')})`);
+        // Múltiples destinos: OR entre todos usando = ANY(array)
+        params.push(destinationsList);
+        const idx = params.length;
+        clauses.push(`(
+          l.villanet_destination_tag = ANY($${idx}::text[]) OR
+          l.villanet_city = ANY($${idx}::text[]) OR
+          l.city = ANY($${idx}::text[]) OR
+          l.country = ANY($${idx}::text[])
+        )`);
       }
 
     } else if (q?.toString().trim()) {
