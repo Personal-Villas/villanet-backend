@@ -987,11 +987,6 @@ function safeJson(x) {
   }
 }
 
-function clampPct(n) {
-  const x = Number(n);
-  return Number.isFinite(x) ? Math.max(0, Math.min(100, x)) : 0;
-}
-
 // ─── Guesty quote parsers ────────────────────────────────────────────────────
 
 function parseGuestyQuote(raw) {
