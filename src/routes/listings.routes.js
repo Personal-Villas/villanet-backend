@@ -7,7 +7,7 @@ import { cache } from "../cache.js";
 const r = Router();
 
 // ✅ Configuración OPTIMIZADA IDÉNTICA a ruta pública
-const AVAILABILITY_SESSION_TTL = 600000; // 10 minutos
+const AVAILABILITY_SESSION_TTL = 86400000; // 10 minutos
 const LAZY_SCAN_CHUNK = 120; // Candidatos por ciclo de escaneo
 const AV_BATCH_SIZE = 15; // Batch size reducido
 const AV_CONCURRENCY = 2; // Máximo 2 consultas concurrentes
