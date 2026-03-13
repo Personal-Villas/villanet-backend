@@ -48,8 +48,10 @@ function toYmd(d) {
 // ─── URL helpers ──────────────────────────────────────────────────────────────
 
 function normalizeBaseUrl(domainOrUrl) {
-  if (!domainOrUrl || typeof domainOrUrl !== "string")
-    return "https://book.guesty.com";
+  if (!domainOrUrl || typeof domainOrUrl !== "string") {
+    console.warn("⚠️  [buildGuestyUrl] guesty_booking_domain is null/empty — falling back to default domain. Check listings table.");
+    return "https://personalvillas.guestybookings.com";
+  }
   const raw = domainOrUrl.trim().replace(/\/+$/, "");
   const withProto =
     raw.startsWith("http://") || raw.startsWith("https://")
@@ -371,6 +373,7 @@ export async function sendQuoteEmail(req, res) {
     const itemsResult = await client.query(
 
 `SELECT qi.*,
+        COALESCE(qi.guesty_booking_domain, l.guesty_booking_domain) AS guesty_booking_domain,
         pm.logo_url as pm_logo_url, pm.name as pm_name
  FROM quote_items qi
  LEFT JOIN listings l ON qi.listing_id = l.listing_id
@@ -409,7 +412,7 @@ export async function sendQuoteEmail(req, res) {
         }
 
         const guestyUrl = buildGuestyUrl({
-          domainOrUrl: item.guesty_booking_domain || "https://book.guesty.com",
+          domainOrUrl: item.guesty_booking_domain,
           listingId: item.listing_id,
           checkInYmd, checkOutYmd, guests: quote.guests,
         });
@@ -597,7 +600,8 @@ export async function generateQuoteEmailHtml(
     return new Intl.NumberFormat("en-US", {
       style: "currency",
       currency: "USD",
-      minimumFractionDigits: 0,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
     }).format(amount);
   };
 
@@ -717,7 +721,7 @@ btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;fo
       const feesTotalRow =
         Number(b.feesTotal) > 0
           ? `<tr style="${S.bdRow}">
-               <td style="${S.bdLabel}">Fees</td>
+               <td style="${S.bdLabel}">Fees subtotal</td>
                <td style="${S.bdVal}">${fmt(b.feesTotal)}</td>
              </tr>`
           : "";
@@ -987,6 +991,111 @@ function safeJson(x) {
   }
 }
 
+// ─── Local DB fees/taxes ──────────────────────────────────────────────────────
+
+/**
+ * Obtiene fees y taxes desde las tablas locales listing_fees / listing_taxes.
+ * Retorna null si el listing no tiene registros (sin fees/taxes).
+ */
+async function getLocalFeesAndTaxes(listingId) {
+  const [feesResult, taxesResult] = await Promise.all([
+    pool.query(
+      `SELECT fee_type, fee_name, value, is_percentage, multiplier, channel, target_fee
+         FROM listing_fees
+        WHERE listing_id = $1 AND is_enabled = true`,
+      [listingId]
+    ),
+    pool.query(
+      `SELECT tax_type, tax_name, rate, is_percentage, quantifier, applied_on
+         FROM listing_taxes
+        WHERE listing_id = $1 AND is_enabled = true`,
+      [listingId]
+    ),
+  ]);
+
+  return {
+    fees: feesResult.rows,
+    taxes: taxesResult.rows,
+    hasFees: feesResult.rows.length > 0,
+    hasTaxes: taxesResult.rows.length > 0,
+  };
+}
+
+/**
+ * Calcula el breakdown completo (base, cleaning, fees, taxes, total)
+ * usando datos de la BD local. Requiere que ya tengamos el `base` (accommodation fare)
+ * obtenido de Guesty via Open API.
+ *
+ * Lógica de fees:
+ *   - is_percentage=true  → value es % sobre `base` (accommodation fare)
+ *   - is_percentage=false → value es monto fijo en USD
+ *   - multiplier: "per_night" multiplica por `nights`; otros se toman como monto único
+ *
+ * Lógica de taxes:
+ *   - is_percentage=true  → rate es % sobre la base especificada en `applied_on`
+ *     ("accommodation" → sobre base; "total" → sobre base+fees; default → sobre base)
+ *   - is_percentage=false → rate es monto fijo
+ */
+function computeBreakdownFromLocal({ base, nights, localData, currency = "USD" }) {
+  const { fees, taxes } = localData;
+
+  let cleaning = 0;
+  const feeBreakdown = [];
+
+  for (const fee of fees) {
+    const raw = Number(fee.value) || 0;
+    const isPercent = Boolean(fee.is_percentage);
+    const multiplier = String(fee.multiplier || "").toLowerCase();
+    const feeName = fee.fee_name || fee.fee_type || "Fee";
+    const feeType = String(fee.fee_type || "").toUpperCase();
+
+    let amount;
+    if (isPercent) {
+      amount = base * (raw / 100);
+    } else {
+      amount = raw;
+    }
+
+    if (multiplier === "per_night") {
+      amount = amount * nights;
+    }
+
+    amount = money2(amount);
+
+    if (feeType.includes("CLEAN") || feeType === "CF") {
+      cleaning += amount;
+    } else {
+      feeBreakdown.push({ title: feeName, amount, type: feeType || "FEE" });
+    }
+  }
+
+  const feesTotal = money2(feeBreakdown.reduce((s, f) => s + f.amount, 0));
+
+  // Taxes aplicados sobre la base o sobre subtotal según `applied_on`
+  let taxesTotal = 0;
+  for (const tax of taxes) {
+    const raw = Number(tax.rate) || 0;
+    const isPercent = Boolean(tax.is_percentage);
+    const appliedOn = String(tax.applied_on || "accommodation").toLowerCase();
+
+    let taxBase;
+    if (appliedOn === "total") {
+      taxBase = base + cleaning + feesTotal;
+    } else {
+      // "accommodation" u otros → sobre base
+      taxBase = base;
+    }
+
+    const amount = isPercent ? money2(taxBase * (raw / 100)) : money2(raw);
+    taxesTotal += amount;
+  }
+
+  taxesTotal = money2(taxesTotal);
+  const total = money2(base + cleaning + feesTotal + taxesTotal);
+
+  return { currency, base, cleaning, feeBreakdown, feesTotal, taxes: taxesTotal, total };
+}
+
 // ─── Guesty quote parsers ────────────────────────────────────────────────────
 
 function parseGuestyQuote(raw) {
@@ -1030,16 +1139,43 @@ export async function calculateQuote(req, res) {
 
     const nights = countStayNights(checkIn, checkOut);
 
-    // Solo Open API (ya no fallback a BE ni cálculo manual)
+    // Solo Open API para el base (accommodation fare)
     const quote = await createOpenAPIQuote({
       listingId,
       checkIn,
       checkOut,
       guestsCount,
-      source: "manual", // "manual" devuelve invoice items completos (fees incluidos)
+      source: "manual",
     });
 
-    const breakdown = extractGuestyPriceBreakdown(quote);
+    const guestyBreakdown = extractGuestyPriceBreakdown(quote);
+
+    // ── Fees/taxes desde BD local ──────────────────────────────────────────
+    let breakdown;
+    let feesSource;
+    try {
+      const localData = await getLocalFeesAndTaxes(listingId);
+
+      if (localData.hasFees || localData.hasTaxes) {
+        console.log(`✅ [calculateQuote] listing=${listingId} → BD local (fees:${localData.fees.length}, taxes:${localData.taxes.length})`);
+        breakdown = computeBreakdownFromLocal({
+          base: guestyBreakdown.base,
+          nights,
+          localData,
+          currency: guestyBreakdown.currency,
+        });
+        feesSource = "open-api+local-fees";
+      } else {
+        console.log(`⚠️  [calculateQuote] listing=${listingId} → sin registros locales, usando Guesty`);
+        breakdown = guestyBreakdown;
+        feesSource = "open-api";
+      }
+    } catch (dbErr) {
+      console.warn(`⚠️  [calculateQuote] listing=${listingId} → error BD local, fallback a Guesty:`, dbErr.message);
+      breakdown = guestyBreakdown;
+      feesSource = "open-api";
+    }
+    // ──────────────────────────────────────────────────────────────────────
 
     const commission = breakdown.total * (commissionPct / 100);
     const totalGross = breakdown.total + commission;
@@ -1060,7 +1196,7 @@ export async function calculateQuote(req, res) {
         commission: money2(commission),
         totalGross: money2(totalGross),
       },
-      source: "open-api",
+      source: feesSource,
       ...(process.env.NODE_ENV === "development" && { debug: { requestId } }),
     };
 
@@ -1173,24 +1309,48 @@ async function getGuestyBreakdown(listingId, checkIn, checkOut, guests, commissi
       checkIn,
       checkOut,
       guestsCount: Number(guests) || 1,
-      source: "manual", 
+      source: "manual",
     });
   } catch (openErr) {
     console.warn(`OpenAPI falló (${openErr.response?.status}):`, openErr.response?.data);
     sourceUsed = "fallback-manual";
-    // Aquí podrías agregar fallback real si lo necesitas
   }
 
   if (!quoteData) {
-    return null; 
+    return null;
   }
 
-  const breakdown = extractGuestyPriceBreakdown(quoteData);
-  
+  const nights = countStayNights(checkIn, checkOut);
+  const guestyBreakdown = extractGuestyPriceBreakdown(quoteData);
+
+  // ── Intentar fees/taxes desde BD local ────────────────────────────────────
+  let breakdown;
+  try {
+    const localData = await getLocalFeesAndTaxes(listingId);
+
+    if (localData.hasFees || localData.hasTaxes) {
+      console.log(`✅ [fees/taxes] listing=${listingId} → BD local (fees:${localData.fees.length}, taxes:${localData.taxes.length})`);
+      breakdown = computeBreakdownFromLocal({
+        base: guestyBreakdown.base,
+        nights,
+        localData,
+        currency: guestyBreakdown.currency,
+      });
+      sourceUsed += "+local-fees";
+    } else {
+      console.log(`⚠️  [fees/taxes] listing=${listingId} → sin registros locales, usando Guesty`);
+      breakdown = guestyBreakdown;
+    }
+  } catch (dbErr) {
+    console.warn(`⚠️  [fees/taxes] listing=${listingId} → error BD local, fallback a Guesty:`, dbErr.message);
+    breakdown = guestyBreakdown;
+  }
+
   return {
     currency: breakdown.currency,
-    nights: countStayNights(checkIn, checkOut),
+    nights,
     base: breakdown.base,
+    cleaning: breakdown.cleaning || 0,
     taxes: breakdown.taxes,
     feeBreakdown: breakdown.feeBreakdown,
     feesTotal: breakdown.feesTotal,

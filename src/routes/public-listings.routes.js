@@ -5,7 +5,7 @@ import { cache } from '../cache.js';
 const r = Router();
 
 // ✅ Configuración OPTIMIZADA idéntica a la ruta protegida
-const AVAILABILITY_SESSION_TTL = 600000; // 10 minutos
+const AVAILABILITY_SESSION_TTL = 86400000; // 10 minutos
 const LAZY_SCAN_CHUNK = 120;             // Candidatos por ciclo de escaneo
 const AV_BATCH_SIZE = 15;               // Batch size reducido
 const AV_CONCURRENCY = 2;               // Máximo 2 consultas concurrentes
@@ -21,6 +21,7 @@ r.get('/', async (req, res) => {
       bathrooms = '',
       minPrice = '',
       maxPrice = '',
+      maxTotalBudget = '',
       checkIn = '',
       checkOut = '',
       badges = '',
@@ -168,7 +169,8 @@ r.get('/', async (req, res) => {
       params.push(Number(minPrice));
       clauses.push(`l.price_usd >= $${params.length}`);
     }
-    if (maxPrice) {
+    // maxPrice solo aplica cuando NO hay maxTotalBudget (el filtro de budget total opera en listing_availability)
+    if (maxPrice && !maxTotalBudget) {
       params.push(Number(maxPrice));
       clauses.push(`l.price_usd <= $${params.length}`);
     }
@@ -303,6 +305,7 @@ r.get('/', async (req, res) => {
           whereSQL,
           orderSQL,
           params: [...params],
+          maxTotalBudget: maxTotalBudget ? Number(maxTotalBudget) : null,
           filters: { searchTerm, badgeSlugs, sort },
           createdAt: Date.now(),
           lastAccessed: Date.now()
@@ -363,7 +366,7 @@ r.get('/', async (req, res) => {
         session.cursor += candidateIds.length;
 
         // 2️⃣ Verificar disponibilidad desde caché local (CA1: sin llamadas a Guesty)
-        const availableInChunk = await checkAvailabilityFromCache(candidateIds, checkIn, checkOut)
+        const availableInChunk = await checkAvailabilityFromCache(candidateIds, checkIn, checkOut, session.maxTotalBudget)
           .catch(err => {
             console.warn(`[Public FullScan] Cache check failed:`, err.message);
             return [];
@@ -667,7 +670,7 @@ function normalizeResults(rows) {
  * @param {string} checkOut YYYY-MM-DD
  * @returns {Promise<string[]>} IDs disponibles
  */
-async function checkAvailabilityFromCache(candidateIds, checkIn, checkOut) {
+async function checkAvailabilityFromCache(candidateIds, checkIn, checkOut, maxTotalBudget = null) {
   if (!candidateIds.length) return [];
 
   const checkInDate  = new Date(checkIn);
@@ -677,23 +680,54 @@ async function checkAvailabilityFromCache(candidateIds, checkIn, checkOut) {
 
   const t0 = Date.now();
 
-  const { rows } = await pool.query(`
-    SELECT la.listing_id
-    FROM listing_availability la
-    WHERE la.listing_id = ANY($1::text[])
-      AND la.date >= $2
-      AND la.date < $3
-      AND la.available = true
-      AND la.cta = false
-      AND la.ctd = false
-    GROUP BY la.listing_id
-    HAVING
-      COUNT(*) = $4
-      AND MIN(CASE WHEN la.date = $2 THEN la.min_nights ELSE NULL END) <= $4
-  `, [candidateIds, checkIn, checkOut, nights]);
+  // Si hay maxTotalBudget: join con listings para descontar fees fijos (cleaning + otherFees)
+  // y comparar el sum real de noches contra el presupuesto restante
+  let queryText, queryParams;
+
+  if (maxTotalBudget !== null) {
+    queryText = `
+      SELECT la.listing_id
+      FROM listing_availability la
+      JOIN listings l ON l.listing_id = la.listing_id
+      WHERE la.listing_id = ANY($1::text[])
+        AND la.date >= $2
+        AND la.date < $3
+        AND la.available = true
+        AND la.cta = false
+        AND la.ctd = false
+      GROUP BY la.listing_id, l.fees
+      HAVING
+        COUNT(*) = $4
+        AND MIN(CASE WHEN la.date = $2 THEN la.min_nights ELSE NULL END) <= $4
+        AND SUM(la.price_usd) <= (
+          $5
+          - COALESCE((l.fees->>'cleaning')::numeric, 0)
+          - COALESCE((l.fees->>'otherFees')::numeric, 0)
+        )
+    `;
+    queryParams = [candidateIds, checkIn, checkOut, nights, maxTotalBudget];
+  } else {
+    queryText = `
+      SELECT la.listing_id
+      FROM listing_availability la
+      WHERE la.listing_id = ANY($1::text[])
+        AND la.date >= $2
+        AND la.date < $3
+        AND la.available = true
+        AND la.cta = false
+        AND la.ctd = false
+      GROUP BY la.listing_id
+      HAVING
+        COUNT(*) = $4
+        AND MIN(CASE WHEN la.date = $2 THEN la.min_nights ELSE NULL END) <= $4
+    `;
+    queryParams = [candidateIds, checkIn, checkOut, nights];
+  }
+
+  const { rows } = await pool.query(queryText, queryParams);
 
   const ms = Date.now() - t0;
-  console.log(`⚡ [checkAvailabilityFromCache] ${rows.length}/${candidateIds.length} disponibles en ${ms}ms`);
+  console.log(`⚡ [checkAvailabilityFromCache] ${rows.length}/${candidateIds.length} disponibles en ${ms}ms${maxTotalBudget ? ` (budget: $${maxTotalBudget})` : ''}`);
 
   return rows.map(r => r.listing_id);
 }
