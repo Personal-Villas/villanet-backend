@@ -48,8 +48,10 @@ function toYmd(d) {
 // ─── URL helpers ──────────────────────────────────────────────────────────────
 
 function normalizeBaseUrl(domainOrUrl) {
-  if (!domainOrUrl || typeof domainOrUrl !== "string")
-    return "https://book.guesty.com";
+  if (!domainOrUrl || typeof domainOrUrl !== "string") {
+    console.warn("⚠️  [buildGuestyUrl] guesty_booking_domain is null/empty — falling back to default domain. Check listings table.");
+    return "https://personalvillas.guestybookings.com";
+  }
   const raw = domainOrUrl.trim().replace(/\/+$/, "");
   const withProto =
     raw.startsWith("http://") || raw.startsWith("https://")
@@ -371,6 +373,7 @@ export async function sendQuoteEmail(req, res) {
     const itemsResult = await client.query(
 
 `SELECT qi.*,
+        COALESCE(qi.guesty_booking_domain, l.guesty_booking_domain) AS guesty_booking_domain,
         pm.logo_url as pm_logo_url, pm.name as pm_name
  FROM quote_items qi
  LEFT JOIN listings l ON qi.listing_id = l.listing_id
@@ -409,7 +412,7 @@ export async function sendQuoteEmail(req, res) {
         }
 
         const guestyUrl = buildGuestyUrl({
-          domainOrUrl: item.guesty_booking_domain || "https://book.guesty.com",
+          domainOrUrl: item.guesty_booking_domain,
           listingId: item.listing_id,
           checkInYmd, checkOutYmd, guests: quote.guests,
         });
@@ -597,7 +600,8 @@ export async function generateQuoteEmailHtml(
     return new Intl.NumberFormat("en-US", {
       style: "currency",
       currency: "USD",
-      minimumFractionDigits: 0,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
     }).format(amount);
   };
 
