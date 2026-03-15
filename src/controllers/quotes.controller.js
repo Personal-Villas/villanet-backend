@@ -50,11 +50,12 @@ function toYmd(d) {
 function normalizeBaseUrl(domainOrUrl) {
   if (!domainOrUrl || typeof domainOrUrl !== "string") {
     console.warn("⚠️  [buildGuestyUrl] guesty_booking_domain is null/empty — falling back to default domain. Check listings table.");
-    return "https://personalvillas.guestybookings.com";
+    return "https://villanet.guestybookings.com";
   }
   const raw = domainOrUrl.trim().replace(/\/+$/, "");
   const withProto =
     raw.startsWith("http://") || raw.startsWith("https://")
+    
       ? raw
       : `https://${raw}`;
   return withProto.replace(/\/+$/, "");
