@@ -6,22 +6,30 @@
  * villanet-catalog-check.js, recupera sus imágenes desde la API de Guesty
  * y actualiza la DB:
  *
- *   - villanet_hero_images  → array JSON con las URLs (ya usado por PropertyCard)
+ *   - villanet_hero_images  → array JSON con las URLs (usado por PropertyCard)
  *   - images_json           → array JSON completo de imágenes
  *   - hero_image_url        → primera imagen como fallback
  *   - villanet_enabled      → true  (activa la propiedad en /properties)
  *
- * Si Guesty no devuelve imágenes para una propiedad, se registra en el log
- * de "Pendientes Manuales" y NO se activa.
+ * IMPORTANTE: Solo se activan propiedades que en Guesty figuren como
+ * isListed = true AND isActive = true. Si una propiedad está desactivada
+ * en Guesty, se reporta en "Pendientes Manuales" y NO se activa en DB,
+ * para evitar que el URL Guardian la marque como falla.
+ *
+ * Si Guesty no devuelve imágenes para una propiedad, también se registra
+ * en "Pendientes Manuales" y NO se activa.
  *
  * Uso:
- *   node scripts/villanet-image-sync.js \
- *     --report ../villanet-report.json \
- *     --dry-run              (opcional: simula sin escribir en DB)
+ *   node scripts/villanet-image-sync.js --dry-run
+ *   node scripts/villanet-image-sync.js
+ *   node scripts/villanet-image-sync.js --report scripts/docs/villanet-report.json
  *
- * Variables de entorno requeridas (mismas que el resto del backend):
+ * Archivos de referencia:
+ *   Input : scripts/docs/villanet-report.json  (generado por villanet-catalog-check.js)
+ *   Output: scripts/docs/villanet-sync-results.json
+ *
+ * Variables de entorno requeridas:
  *   PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD
- *   (el token de Guesty lo maneja guestyOpenApiClient.js via getGuestyAccessToken)
  */
 
 'use strict';
@@ -31,19 +39,15 @@ import fs from 'fs';
 import path from 'path';
 import { parseArgs } from 'util';
 import { Pool } from 'pg';
-
-// Reutilizamos exactamente lo que ya existe en guesty.service.js
 import { fetchListingById, extractImageUrlsFromListing } from '../src/services/guesty.service.js';
-
-// Token de Guesty via el cliente autenticado existente
 import { getGuestyAccessToken } from '../src/services/guestyAuth.js';
 
 // ── CLI args ──────────────────────────────────────────────────────────────────
 const { values: args } = parseArgs({
   options: {
-    report:  { type: 'string',  default: '../villanet-report.json' },
+    report:    { type: 'string',  default: 'scripts/docs/villanet-report.json' },
     'dry-run': { type: 'boolean', default: false },
-    help:    { type: 'boolean', default: false },
+    help:      { type: 'boolean', default: false },
   },
   strict: false,
 });
@@ -53,7 +57,7 @@ if (args.help) {
 Usage: node scripts/villanet-image-sync.js [options]
 
   --report    Path al JSON generado por villanet-catalog-check.js
-              (default: ../villanet-report.json)
+              (default: scripts/docs/villanet-report.json)
   --dry-run   Simula el proceso sin escribir en la DB ni activar propiedades
   --help      Muestra este mensaje
 `);
@@ -62,7 +66,7 @@ Usage: node scripts/villanet-image-sync.js [options]
 
 const IS_DRY_RUN = args['dry-run'];
 
-// ── DB pool (misma config que db.js) ─────────────────────────────────────────
+// ── DB pool ───────────────────────────────────────────────────────────────────
 const pool = new Pool({
   host:     process.env.PGHOST,
   port:     Number(process.env.PGPORT),
@@ -76,8 +80,6 @@ const pool = new Pool({
 
 // ── Actualización en DB ───────────────────────────────────────────────────────
 async function updateListingImages(listingId, imageUrls) {
-  // Construimos el array de hero images en el mismo formato que usa PropertyCard.tsx
-  // (mismo esquema que generó el backfill de PER-113)
   const heroImages = imageUrls.slice(0, 10).map((url, i) => ({
     url,
     order: i,
@@ -103,13 +105,15 @@ async function updateListingImages(listingId, imageUrls) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
   const reportPath = path.resolve(args.report);
+  const outPath    = path.resolve('scripts/docs/villanet-sync-results.json');
 
   if (!fs.existsSync(reportPath)) {
     console.error(`❌  No se encontró el reporte: ${reportPath}`);
+    console.error(`    Generalo primero con: node scripts/villanet-catalog-check.js`);
     process.exit(1);
   }
 
-  const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+  const report   = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
   const inactive = report.matched_inactive ?? [];
 
   if (!inactive.length) {
@@ -122,23 +126,21 @@ async function main() {
 
   console.log(`\n🔄  Procesando ${inactive.length} propiedades matched_inactive...\n`);
 
-  // Obtenemos el token una vez (guestyOpenApiClient lo cachea internamente,
-  // pero fetchListingById de guesty.service.js lo recibe como argumento)
   const guestyToken = await getGuestyAccessToken();
 
   const results = {
-    activated:        [],   // ✅ Imágenes encontradas y propiedad activada
-    pending_manual:   [],   // ⚠️ Sin imágenes en Guesty — requiere acción manual
-    error:            [],   // ❌ Error de red u otro fallo
+    activated:      [],   // ✅ Imágenes encontradas, activa en Guesty → habilitada en DB
+    pending_manual: [],   // ⚠️ Sin imágenes o inactiva en Guesty → no se activa
+    error:          [],   // ❌ Error de red u otro fallo
   };
 
   for (const prop of inactive) {
     const { listing_id, villanet_name, db_name } = prop;
 
-    // Los listing_ids de 24 chars son MongoDB ObjectIds de Guesty directamente.
-    // Los de 32 chars son hashes internos — en ese caso no podemos hacer el fetch.
+    // Solo los IDs de 24 chars son MongoDB ObjectIds de Guesty.
+    // Los de 32 chars son hashes internos — no se pueden fetchear.
     if (listing_id.length !== 24) {
-      console.warn(`  ⚠️  ${villanet_name}: listing_id "${listing_id}" no es un ID de Guesty (len=${listing_id.length}), saltando`);
+      console.warn(`  ⚠️  ${villanet_name}: listing_id "${listing_id}" no es un ObjectId de Guesty (len=${listing_id.length}), saltando`);
       results.pending_manual.push({
         listing_id,
         villanet_name,
@@ -151,7 +153,6 @@ async function main() {
     process.stdout.write(`  🔍  ${villanet_name} (${listing_id})... `);
 
     try {
-      // Reutilizamos fetchListingById de guesty.service.js
       const guestyListing = await fetchListingById(guestyToken, listing_id);
 
       if (!guestyListing) {
@@ -160,11 +161,30 @@ async function main() {
         continue;
       }
 
-      // Reutilizamos extractImageUrlsFromListing de guesty.service.js
+      // Verificar que la propiedad esté activa y listada en Guesty.
+      // Si no lo está, no la activamos en DB para evitar fallas en el URL Guardian.
+      //
+      // NOTA: La Guesty Open API v1 no devuelve un campo "isActive" en GET /listings/:id.
+      // El campo correcto es "active" (boolean). Si tampoco existe, se considera activa
+      // cuando isListed=true (criterio suficiente para mostrarse en /properties).
+      const isListed = guestyListing.isListed ?? false;
+      const isActive = guestyListing.active ?? guestyListing.isActive ?? isListed;
+
+      if (!isListed || !isActive) {
+        console.log(`⚠️  inactiva en Guesty (isListed=${isListed}, active=${isActive}) — omitida`);
+        results.pending_manual.push({
+          listing_id,
+          villanet_name,
+          db_name,
+          reason: `Inactiva en Guesty (isListed=${isListed}, active=${isActive})`,
+        });
+        continue;
+      }
+
       const imageUrls = extractImageUrlsFromListing(guestyListing);
 
       if (!imageUrls.length) {
-        console.log('⚠️  Sin imágenes');
+        console.log('⚠️  sin imágenes en Guesty');
         results.pending_manual.push({
           listing_id,
           villanet_name,
@@ -179,34 +199,23 @@ async function main() {
       }
 
       console.log(`✅  ${imageUrls.length} imágenes${IS_DRY_RUN ? ' (dry-run)' : ' → DB actualizada'}`);
-      results.activated.push({
-        listing_id,
-        villanet_name,
-        db_name,
-        images_count: imageUrls.length,
-      });
+      results.activated.push({ listing_id, villanet_name, db_name, images_count: imageUrls.length });
 
     } catch (err) {
       console.log(`❌  Error: ${err.message}`);
-      results.error.push({
-        listing_id,
-        villanet_name,
-        db_name,
-        reason: err.message,
-      });
+      results.error.push({ listing_id, villanet_name, db_name, reason: err.message });
     }
   }
 
   await pool.end();
 
-  // ── Resumen en consola ────────────────────────────────────────────────────
+  // ── Resumen ───────────────────────────────────────────────────────────────
   console.log('\n══════════════════════════════════════════════════');
   console.log(`✅  Activadas exitosamente  : ${results.activated.length}`);
   console.log(`⚠️   Pendientes manuales     : ${results.pending_manual.length}`);
   console.log(`❌  Errores                 : ${results.error.length}`);
   console.log('══════════════════════════════════════════════════\n');
 
-  // ── Log de pendientes manuales ────────────────────────────────────────────
   if (results.pending_manual.length) {
     console.log('⚠️   PENDIENTES MANUALES:');
     for (const p of results.pending_manual)
@@ -221,11 +230,11 @@ async function main() {
     console.log('');
   }
 
-  // ── JSON con resultados completos ─────────────────────────────────────────
-  const outPath = path.resolve('../villanet-sync-results.json');
+  // ── Guardar reporte ───────────────────────────────────────────────────────
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, JSON.stringify({
-    ran_at:    new Date().toISOString(),
-    dry_run:   IS_DRY_RUN,
+    ran_at:  new Date().toISOString(),
+    dry_run: IS_DRY_RUN,
     summary: {
       total_processed: inactive.length,
       activated:       results.activated.length,
@@ -234,7 +243,7 @@ async function main() {
     },
     ...results,
   }, null, 2));
-  console.log(`📄  Resultados completos → ${outPath}\n`);
+  console.log(`📄  Resultados → ${outPath}\n`);
 }
 
 main().catch(err => {
