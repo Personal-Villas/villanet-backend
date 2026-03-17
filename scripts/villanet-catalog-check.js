@@ -10,10 +10,16 @@
  *   not_found        → no existe en DB  (hay que crear desde cero)
  *
  * Uso:
- *   node scripts/villanet-catalog-check.js \
- *     --xlsx  ../Villa_Net_V1_0_Tag_Database.xlsx \
- *     --out   ../villanet-report \
- *     --threshold 0.8
+ *   node scripts/villanet-catalog-check.js
+ *   node scripts/villanet-catalog-check.js --xlsx scripts/docs/Villa_Net_V1_0_Tag_Database.xlsx
+ *   node scripts/villanet-catalog-check.js --threshold 0.8
+ *
+ * Archivos de referencia esperados en scripts/docs/:
+ *   - Villa_Net_V1_0_Tag_Database.xlsx   (catálogo PO)
+ *
+ * Reportes generados en scripts/docs/:
+ *   - villanet-report.json
+ *   - villanet-report.csv
  *
  * Requiere: npm install xlsx dotenv pg
  */
@@ -29,8 +35,8 @@ import { Pool } from 'pg';
 // ── CLI args ──────────────────────────────────────────────────────────────────
 const { values: args } = parseArgs({
   options: {
-    xlsx:      { type: 'string',  default: '../Villa_Net_V1_0_Tag_Database.xlsx' },
-    out:       { type: 'string',  default: '../villanet-report' },
+    xlsx:      { type: 'string',  default: 'scripts/docs/Villa_Net_V1_0_Tag_Database.xlsx' },
+    out:       { type: 'string',  default: 'scripts/docs/villanet-report' },
     threshold: { type: 'string',  default: '0.8' },
     help:      { type: 'boolean', default: false },
   },
@@ -41,10 +47,10 @@ if (args.help) {
   console.log(`
 Usage: node scripts/villanet-catalog-check.js [options]
 
-  --xlsx       Path to Villa Net .xlsx         (default: ../Villa_Net_V1_0_Tag_Database.xlsx)
-  --out        Output path prefix              (default: ../villanet-report)
-  --threshold  Fuzzy similarity 0-1            (default: 0.8)
-  --help       Show this message
+  --xlsx       Path al catálogo Villa Net .xlsx   (default: scripts/docs/Villa_Net_V1_0_Tag_Database.xlsx)
+  --out        Prefijo para los archivos de output (default: scripts/docs/villanet-report)
+  --threshold  Similitud fuzzy mínima 0-1          (default: 0.8)
+  --help       Muestra este mensaje
 `);
   process.exit(0);
 }
@@ -91,8 +97,8 @@ function findBestMatch(name, dbRows) {
   return { match: bestRow, score: bestScore };
 }
 
-// Busca variantes en DB cuyo nombre empieza con el nombre del xlsx
-// Usado solo cuando findBestMatch no supera el threshold
+// Busca variantes en DB cuyo nombre normalizado empieza con el nombre del xlsx.
+// Usado solo cuando findBestMatch no supera el threshold.
 function findPrefixVariants(name, dbRows) {
   const na = normalize(name);
   if (na.length < 4) return [];
@@ -112,7 +118,7 @@ async function loadXlsx(filePath) {
   return rows.map(r => (r['Unit Name'] || '').trim()).filter(Boolean);
 }
 
-// ── DB loader — mismas columnas que usan las rutas ────────────────────────────
+// ── DB loader ─────────────────────────────────────────────────────────────────
 async function loadFromDB(pool) {
   const { rows } = await pool.query(`
     SELECT
@@ -138,10 +144,13 @@ async function main() {
 
   if (!fs.existsSync(xlsxPath)) {
     console.error(`❌  No se encontró el XLSX: ${xlsxPath}`);
+    console.error(`    Ubicalo en scripts/docs/ o pasá --xlsx con el path correcto.`);
     process.exit(1);
   }
 
-  // Conexión a la DB usando las mismas variables que db.js
+  // Asegurar que el directorio de output existe
+  fs.mkdirSync(path.dirname(outBase), { recursive: true });
+
   const pool = new Pool({
     host:     process.env.PGHOST,
     port:     Number(process.env.PGPORT),
@@ -150,7 +159,7 @@ async function main() {
     password: process.env.PGPASSWORD,
     ssl: { rejectUnauthorized: false },
     max: 5,
-    connectionTimeoutMillis: 10000,
+    connectionTimeoutMillis: 100000,
   });
 
   console.log('\n📂  Cargando datos...');
@@ -185,10 +194,9 @@ async function main() {
     const { match, score } = findBestMatch(xlsxName, dbRows);
 
     if (!match || score < THRESHOLD) {
-      // No supera el threshold \u2014 buscar variantes por prefijo
+      // No supera el threshold — buscar variantes por prefijo
       const variants = findPrefixVariants(xlsxName, dbRows);
       if (variants.length) {
-        // Hay variantes en DB que empiezan con este nombre
         const variantNames = variants.map(v => v.name).join(' | ');
         const variantIds   = variants.map(v => v.listing_id).join(' | ');
         report.partial_match.push({
