@@ -11,11 +11,11 @@
  *
  * Uso:
  *   node scripts/villanet-catalog-check.js
- *   node scripts/villanet-catalog-check.js --xlsx scripts/docs/Villa_Net_V1_0_Tag_Database.xlsx
+ *   node scripts/villanet-catalog-check.js --xlsx scripts/docs/Villa_Net_Tag_Database.xlsx
  *   node scripts/villanet-catalog-check.js --threshold 0.8
  *
  * Archivos de referencia esperados en scripts/docs/:
- *   - Villa_Net_V1_0_Tag_Database.xlsx   (catálogo PO)
+ *   - Villa_Net_Tag_Database.xlsx   (catálogo PO)
  *
  * Reportes generados en scripts/docs/:
  *   - villanet-report.json
@@ -35,7 +35,7 @@ import { Pool } from 'pg';
 // ── CLI args ──────────────────────────────────────────────────────────────────
 const { values: args } = parseArgs({
   options: {
-    xlsx:      { type: 'string',  default: 'scripts/docs/Villa_Net_V1_0_Tag_Database.xlsx' },
+    xlsx:      { type: 'string',  default: 'scripts/docs/Villa_Net_Tag_Database.xlsx' },
     out:       { type: 'string',  default: 'scripts/docs/villanet-report' },
     threshold: { type: 'string',  default: '0.8' },
     help:      { type: 'boolean', default: false },
@@ -47,7 +47,7 @@ if (args.help) {
   console.log(`
 Usage: node scripts/villanet-catalog-check.js [options]
 
-  --xlsx       Path al catálogo Villa Net .xlsx   (default: scripts/docs/Villa_Net_V1_0_Tag_Database.xlsx)
+  --xlsx       Path al catálogo Villa Net .xlsx   (default: scripts/docs/Villa_Net_Tag_Database.xlsx)
   --out        Prefijo para los archivos de output (default: scripts/docs/villanet-report)
   --threshold  Similitud fuzzy mínima 0-1          (default: 0.8)
   --help       Muestra este mensaje

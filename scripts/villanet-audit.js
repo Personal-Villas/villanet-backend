@@ -7,6 +7,10 @@
  *
  * Solo procesa registros donde: villanet_enabled = true AND is_listed = true
  *
+ * Matching:
+ *   - Si la fila del xlsx tiene columna "listing_id" con valor → match directo por ID
+ *   - Si no → fallback a fuzzy match por nombre (comportamiento anterior)
+ *
  * Modos:
  *   node scripts/villanet-audit.js               → Dry run (solo reporta, no escribe)
  *   node scripts/villanet-audit.js --update       → Aplica correcciones en DB
@@ -34,11 +38,11 @@ import { Pool } from 'pg';
 // ── CLI ───────────────────────────────────────────────────────────────────────
 const { values: args } = parseArgs({
   options: {
-    xlsx:      { type: 'string',  default: 'scripts/docs/Villa_Net_V1_0_Tag_Database.xlsx' },
+    xlsx:      { type: 'string',  default: 'scripts/docs/Villa_Net_Tag_Database.xlsx' },
     out:       { type: 'string',  default: 'scripts/docs/villanet-audit' },
     threshold: { type: 'string',  default: '0.82' },
     update:    { type: 'boolean', default: false },
-    field:     { type: 'string',  default: '' },       // opcional: limitar a un campo
+    field:     { type: 'string',  default: '' },
     help:      { type: 'boolean', default: false },
   },
   strict: false,
@@ -48,9 +52,9 @@ if (args.help) {
   console.log(`
 Usage: node scripts/villanet-audit.js [options]
 
-  --xlsx       Path al .xlsx de Robbie    (default: scripts/docs/Villa_Net_V1_0_Tag_Database.xlsx)
+  --xlsx       Path al .xlsx de Robbie    (default: scripts/docs/Villa_Net_Tag_Database.xlsx)
   --out        Prefijo para los reportes  (default: scripts/docs/villanet-audit)
-  --threshold  Similitud fuzzy mínima     (default: 0.82)
+  --threshold  Similitud fuzzy mínima     (default: 0.82)  [solo aplica al fallback por nombre]
   --update     Aplica correcciones en DB  (default: false = dry run)
   --field      Limitar update a un campo específico (ej: villanet_commission_rate)
   --help       Muestra este mensaje
@@ -63,10 +67,7 @@ const THRESHOLD   = parseFloat(args.threshold);
 const FIELD_ONLY  = args.field?.trim() || null;
 
 // ── Mapping Excel → DB ────────────────────────────────────────────────────────
-// Cada entrada: [xlsxColumn, dbColumn, type]
-// type: 'bool' | 'number' | 'string'
 const FIELD_MAP = [
-  // Texto / destino
   ['VILLA NET DESTINATION TAG',          'villanet_destination_tag',            'string'],
   ['CITY',                               'villanet_city',                       'string'],
   ['PMC-INFORMATION',                    'villanet_pmc_information',            'string'],
@@ -75,15 +76,11 @@ const FIELD_MAP = [
   ['VILLA NET PARTNER RESERVATION EMAIL','villanet_partner_reservation_email',  'string'],
   ['VILLA NET STAFF GRATUITY GUIDELINE', 'villanet_staff_gratuity_guideline',   'string'],
   ['VILLA NET RESORT COLLECTION NAME',   'villanet_resort_collection_name',     'string'],
-
-  // Numéricos
   ['VILLA NET RANK',                     'villanet_rank',                       'number'],
   ['VILLA NET COMMISSION RATE',          'villanet_commission_rate',            'number'],
   ['VILLA NET EXCLUSIVE UNITS MANAGED',  'villanet_exclusive_units_managed',    'number'],
   ['VILLA NET YEARS IN BUSINESS',        'villanet_years_in_business',          'number'],
   ['VILLA NET AVG RESPONSE TIME HOURS',  'villanet_avg_response_time_hours',    'number'],
-
-  // Booleanos (yes/no en xlsx → true/false en DB)
   ['VILLA NET CALENDAR SYNC 99',         'villanet_calendar_sync_99',           'bool'],
   ['VILLA NET CREDIT CARD ACCEPTED',     'villanet_credit_card_accepted',       'bool'],
   ['VILLA NET INSURED',                  'villanet_insured',                    'bool'],
@@ -108,7 +105,6 @@ const FIELD_MAP = [
   ['VILLA NET HEATED POOL',              'villanet_heated_pool',                'bool'],
 ];
 
-// Si se pasó --field, filtrar el map
 const ACTIVE_FIELD_MAP = FIELD_ONLY
   ? FIELD_MAP.filter(([, db]) => db === FIELD_ONLY)
   : FIELD_MAP;
@@ -119,7 +115,7 @@ if (FIELD_ONLY && !ACTIVE_FIELD_MAP.length) {
   process.exit(1);
 }
 
-// ── Fuzzy matching (Levenshtein, sin dependencias externas) ──────────────────
+// ── Fuzzy matching (fallback cuando no hay listing_id en xlsx) ────────────────
 function levenshtein(a, b) {
   const m = a.length, n = b.length;
   const dp = Array.from({ length: m + 1 }, (_, i) =>
@@ -158,57 +154,42 @@ function findBestMatch(xlsxName, dbRows) {
   return { match: bestRow, score: best };
 }
 
-// ── Normalización de valores para comparación ────────────────────────────────
+// ── Normalización de valores ──────────────────────────────────────────────────
 function normalizeXlsxValue(raw, type) {
   if (raw === null || raw === undefined) return null;
-
   if (type === 'bool') {
     const s = String(raw).trim().toLowerCase();
     if (s === 'yes' || s === 'true' || s === '1') return true;
     if (s === 'no'  || s === 'false'|| s === '0') return false;
     return null;
   }
-
   if (type === 'number') {
     const n = parseFloat(raw);
     return isNaN(n) ? null : n;
   }
-
-  // string
   const s = String(raw).trim();
   return s === '' || s.toLowerCase() === 'null' ? null : s;
 }
 
 function normalizeDbValue(raw, type) {
   if (raw === null || raw === undefined) return null;
-
   if (type === 'bool') {
     if (typeof raw === 'boolean') return raw;
     const s = String(raw).trim().toLowerCase();
     return s === 'true' || s === '1' || s === 'yes';
   }
-
   if (type === 'number') {
     const n = parseFloat(raw);
     return isNaN(n) ? null : n;
   }
-
   return String(raw).trim() || null;
 }
 
 function valuesMatch(xlsxVal, dbVal, type) {
   if (xlsxVal === null && dbVal === null) return true;
   if (xlsxVal === null || dbVal === null) return false;
-
-  if (type === 'number') {
-    // Allow small float differences (e.g. 10.0 vs 10)
-    return Math.abs(xlsxVal - dbVal) < 0.001;
-  }
-
-  if (type === 'string') {
-    return xlsxVal.toLowerCase() === dbVal.toLowerCase();
-  }
-
+  if (type === 'number') return Math.abs(xlsxVal - dbVal) < 0.001;
+  if (type === 'string') return xlsxVal.toLowerCase() === dbVal.toLowerCase();
   return xlsxVal === dbVal;
 }
 
@@ -224,20 +205,23 @@ async function loadXlsx(filePath) {
   const ws   = wb.Sheets[wb.SheetNames[0]];
   const rows = xlsx.utils.sheet_to_json(ws, { defval: null });
 
-  // AC5: capture all column headers present in the xlsx
   const xlsxColumns = rows.length > 0 ? Object.keys(rows[0]) : [];
+  const hasIdCol    = xlsxColumns.includes('listing_id');
 
   const parsed = rows
     .filter(r => r['Unit Name']?.toString().trim())
     .map(r => {
-      const entry = { xlsxName: r['Unit Name'].trim() };
+      const entry = {
+        xlsxName:   r['Unit Name'].trim(),
+        xlsxListingId: hasIdCol ? (r['listing_id']?.toString().trim() || null) : null,
+      };
       for (const [xlsxCol, dbCol, type] of FIELD_MAP) {
         entry[dbCol] = normalizeXlsxValue(r[xlsxCol], type);
       }
       return entry;
     });
 
-  return { rows: parsed, xlsxColumns };
+  return { rows: parsed, xlsxColumns, hasIdCol };
 }
 
 // ── DB loader ─────────────────────────────────────────────────────────────────
@@ -260,8 +244,6 @@ async function loadFromDB(pool) {
 
 // ── DB update ─────────────────────────────────────────────────────────────────
 async function applyUpdates(pool, updates) {
-  // updates: [ { listing_id, field, dbCol, type, xlsxVal, dbVal } ]
-  // Group by listing_id for batch UPDATE per row
   const byId = new Map();
   for (const u of updates) {
     if (!byId.has(u.listing_id)) byId.set(u.listing_id, []);
@@ -277,8 +259,6 @@ async function applyUpdates(pool, updates) {
     for (const [listing_id, fields] of byId) {
       const setClauses = [];
       const values     = [];
-
-      // Deduplicar: si el mismo campo aparece varias veces, gana el último valor
       const dedupedFields = new Map();
       for (const f of fields) dedupedFields.set(f.field, f);
 
@@ -333,7 +313,9 @@ async function main() {
     database: process.env.PGDATABASE,
     user:     process.env.PGUSER,
     password: process.env.PGPASSWORD,
-    ssl: { rejectUnauthorized: false },
+    ssl: process.env.PGHOST === 'localhost' || process.env.PGHOST === '127.0.0.1'
+      ? false
+      : { rejectUnauthorized: false },
     max: 5,
     connectionTimeoutMillis: 1000000,
   });
@@ -349,19 +331,24 @@ async function main() {
     process.exit(1);
   }
 
-  const { rows: xlsxRows, xlsxColumns } = xlsxResult;
+  const { rows: xlsxRows, xlsxColumns, hasIdCol } = xlsxResult;
 
-  // ── AC5: Detectar columnas nuevas en xlsx que no están en FIELD_MAP ─────────
+  // AC5: columnas nuevas en xlsx
   const knownXlsxCols = new Set([
+    'listing_id',
     'Unit Name',
     'Current Guesty Tags',
     ...FIELD_MAP.map(([xlsxCol]) => xlsxCol),
   ]);
   const unknownCols = xlsxColumns.filter(col => !knownXlsxCols.has(col));
 
+  // Build DB index by listing_id for direct lookups
+  const dbById = new Map(dbRows.map(r => [r.listing_id, r]));
+
   console.log(`✅  XLSX (catálogo Robbie)          : ${xlsxRows.length} propiedades`);
   console.log(`✅  DB (villanet_enabled + is_listed): ${dbRows.length} propiedades`);
-  console.log(`🔎  Fuzzy threshold                 : ${THRESHOLD}`);
+  console.log(`🔑  Modo matching                   : ${hasIdCol ? 'listing_id directo (con fallback fuzzy)' : 'fuzzy por nombre'}`);
+  console.log(`🔎  Fuzzy threshold                 : ${THRESHOLD}${hasIdCol ? ' (solo fallback)' : ''}`);
   console.log(`📋  Campos auditados                : ${ACTIVE_FIELD_MAP.length}`);
 
   if (unknownCols.length > 0) {
@@ -376,31 +363,58 @@ async function main() {
 
   // ── Matching y comparación ────────────────────────────────────────────────
   const results = {
-    matched_ok:      [],  // Matched, todos los campos correctos
-    matched_diffs:   [],  // Matched, tiene discrepancias
-    no_match:        [],  // No se encontró match en DB con el threshold
+    matched_ok:    [],
+    matched_diffs: [],
+    no_match:      [],
+    id_not_in_db:  [],  // listing_id presente en xlsx pero no en DB activa
   };
 
-  const allDiscrepancies = []; // lista plana para CSV y --update
+  const allDiscrepancies = [];
 
   for (const xlsxRow of xlsxRows) {
-    const { match, score } = findBestMatch(xlsxRow.xlsxName, dbRows);
+    let match  = null;
+    let score  = null;
+    let method = 'fuzzy';
 
-    if (!match || score < THRESHOLD) {
-      results.no_match.push({
-        xlsx_name:       xlsxRow.xlsxName,
-        best_db_name:    match?.name || null,
-        best_score:      match ? +score.toFixed(3) : null,
-      });
-      continue;
+    // 1. Match directo por listing_id si está disponible
+    if (xlsxRow.xlsxListingId) {
+      const directMatch = dbById.get(xlsxRow.xlsxListingId);
+      if (directMatch) {
+        match  = directMatch;
+        score  = 1000;   // sentinel: match exacto por ID
+        method = 'id';
+      } else {
+        // ID existe en xlsx pero no en la vista activa de DB
+        results.id_not_in_db.push({
+          xlsx_name:    xlsxRow.xlsxName,
+          listing_id:   xlsxRow.xlsxListingId,
+          reason:       'not in DB active view (villanet_enabled=true AND is_listed=true)',
+        });
+        continue;
+      }
     }
 
-    // Comparar cada campo
+    // 2. Fallback: fuzzy por nombre
+    if (!match) {
+      const result = findBestMatch(xlsxRow.xlsxName, dbRows);
+      if (!result.match || result.score < THRESHOLD) {
+        results.no_match.push({
+          xlsx_name:    xlsxRow.xlsxName,
+          best_db_name: result.match?.name || null,
+          best_score:   result.match ? +result.score.toFixed(3) : null,
+        });
+        continue;
+      }
+      match  = result.match;
+      score  = result.score;
+      method = 'fuzzy';
+    }
+
+    // Comparar campos
     const diffs = [];
     for (const [, dbCol, type] of ACTIVE_FIELD_MAP) {
-      const xlsxVal = xlsxRow[dbCol];                          // ya normalizado
+      const xlsxVal = xlsxRow[dbCol];
       const dbVal   = normalizeDbValue(match[dbCol], type);
-
       if (!valuesMatch(xlsxVal, dbVal, type)) {
         diffs.push({
           listing_id: match.listing_id,
@@ -410,25 +424,30 @@ async function main() {
           type,
           xlsx_value: xlsxVal,
           db_value:   dbVal,
-          score:      score === 1 ? 1000 : +score.toFixed(3),
+          score:      score === 1000 ? 1 : +score.toFixed(3),
+          method,
         });
       }
     }
 
+    const scoreOut = score === 1000 ? 1000 : +score.toFixed(3);
+
     if (diffs.length === 0) {
       results.matched_ok.push({
-        xlsx_name:    xlsxRow.xlsxName,
-        db_name:      match.name,
-        listing_id:   match.listing_id,
-        score:        score === 1 ? 1000 : +score.toFixed(3),
+        xlsx_name:  xlsxRow.xlsxName,
+        db_name:    match.name,
+        listing_id: match.listing_id,
+        score:      scoreOut,
+        method,
       });
     } else {
       results.matched_diffs.push({
-        xlsx_name:    xlsxRow.xlsxName,
-        db_name:      match.name,
-        listing_id:   match.listing_id,
-        score:        score === 1 ? 1000 : +score.toFixed(3),
-        diff_count:   diffs.length,
+        xlsx_name:  xlsxRow.xlsxName,
+        db_name:    match.name,
+        listing_id: match.listing_id,
+        score:      scoreOut,
+        diff_count: diffs.length,
+        method,
         diffs,
       });
       allDiscrepancies.push(...diffs);
@@ -440,10 +459,21 @@ async function main() {
   console.log(`✅  Matched sin diferencias  : ${results.matched_ok.length}`);
   console.log(`⚠️   Matched con diferencias  : ${results.matched_diffs.length}`);
   console.log(`❌  Sin match en DB           : ${results.no_match.length}`);
+  if (results.id_not_in_db.length > 0) {
+    console.log(`🔴  ID en xlsx no activa en DB: ${results.id_not_in_db.length}`);
+  }
   console.log(`📊  Total discrepancias       : ${allDiscrepancies.length}`);
   console.log('─'.repeat(60));
 
-  // Top campos con más diferencias
+  if (results.id_not_in_db.length > 0) {
+    console.log('\n🔴  LISTING_IDs EN XLSX SIN MATCH ACTIVO EN DB:');
+    console.log('    (propiedad existe en DB pero villanet_enabled=false o is_listed=false)\n');
+    for (const r of results.id_not_in_db) {
+      console.log(`    • "${r.xlsx_name}"  →  ${r.listing_id}`);
+    }
+    console.log('');
+  }
+
   if (allDiscrepancies.length > 0) {
     const byField = {};
     for (const d of allDiscrepancies) {
@@ -458,11 +488,11 @@ async function main() {
     console.log('');
   }
 
-  // Muestra las primeras 20 discrepancias en consola
   if (results.matched_diffs.length > 0) {
     console.log('⚠️   PRIMERAS 20 DISCREPANCIAS:\n');
     for (const prop of results.matched_diffs.slice(0, 20)) {
-      console.log(`  📦 "${prop.db_name}" (${prop.listing_id}) — ${prop.diff_count} diferencia(s):`);
+      const tag = prop.method === 'id' ? '🔑' : '🔤';
+      console.log(`  ${tag} "${prop.db_name}" (${prop.listing_id}) — ${prop.diff_count} diferencia(s):`);
       for (const d of prop.diffs) {
         console.log(`     • ${d.field}`);
         console.log(`       XLSX: ${JSON.stringify(d.xlsx_value)}`);
@@ -474,7 +504,7 @@ async function main() {
     }
   }
 
-  // ── Aplicar updates (solo con --update) ──────────────────────────────────
+  // ── Aplicar updates ───────────────────────────────────────────────────────
   if (!IS_DRY_RUN && allDiscrepancies.length > 0) {
     console.log(`\n⚡  Aplicando ${allDiscrepancies.length} correcciones en DB...`);
     try {
@@ -493,41 +523,43 @@ async function main() {
   // ── JSON ──────────────────────────────────────────────────────────────────
   const jsonPath = `${outBase}.json`;
   fs.writeFileSync(jsonPath, JSON.stringify({
-    ran_at:    new Date().toISOString(),
-    dry_run:   IS_DRY_RUN,
+    ran_at:       new Date().toISOString(),
+    dry_run:      IS_DRY_RUN,
     field_filter: FIELD_ONLY || null,
-    threshold: THRESHOLD,
+    threshold:    THRESHOLD,
+    match_mode:   hasIdCol ? 'listing_id + fuzzy fallback' : 'fuzzy only',
     summary: {
       xlsx_rows:            xlsxRows.length,
       db_active_rows:       dbRows.length,
       matched_ok:           results.matched_ok.length,
       matched_diffs:        results.matched_diffs.length,
       no_match:             results.no_match.length,
+      id_not_in_db:         results.id_not_in_db.length,
       total_discrepancies:  allDiscrepancies.length,
       unknown_xlsx_columns: unknownCols.length,
     },
-    // AC5: columnas nuevas en xlsx que no están en el esquema
     unknown_xlsx_columns: unknownCols,
-    matched_diffs: results.matched_diffs,
-    no_match:      results.no_match,
+    id_not_in_db:         results.id_not_in_db,
+    matched_diffs:        results.matched_diffs,
+    no_match:             results.no_match,
   }, null, 2));
   console.log(`📄  JSON → ${jsonPath}`);
 
-  // ── CSV (una fila por discrepancia) ───────────────────────────────────────
+  // ── CSV ───────────────────────────────────────────────────────────────────
   const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
 
-  // Section 1: discrepancies
   const csvLines = [
     '## DISCREPANCIAS — campos con valores distintos entre XLSX y DB',
-    'listing_id,db_name,xlsx_name,similarity_pct,field,type,xlsx_value,db_value',
+    'listing_id,db_name,xlsx_name,match_method,similarity_pct,field,type,xlsx_value,db_value',
   ];
 
   for (const d of allDiscrepancies) {
-    const simPct = d.score === 1000 ? '100%' : `${(d.score * 100).toFixed(1)}%`;
+    const simPct = d.method === 'id' ? '100% (id)' : `${(d.score * 100).toFixed(1)}%`;
     csvLines.push([
       esc(d.listing_id),
       esc(d.db_name),
       esc(d.xlsx_name),
+      esc(d.method),
       simPct,
       esc(d.field),
       esc(d.type),
@@ -536,25 +568,26 @@ async function main() {
     ].join(','));
   }
 
-  // Section 2: no-match (below threshold — need manual review)
+  if (results.id_not_in_db.length > 0) {
+    csvLines.push('');
+    csvLines.push('## ID EN XLSX NO ACTIVA EN DB — villanet_enabled=false o is_listed=false');
+    csvLines.push('listing_id,xlsx_name,reason');
+    for (const r of results.id_not_in_db) {
+      csvLines.push([esc(r.listing_id), esc(r.xlsx_name), esc(r.reason)].join(','));
+    }
+  }
+
   csvLines.push('');
-  csvLines.push('## SIN MATCH — similitud < threshold, requieren revisión manual');
-  csvLines.push('listing_id,db_name,xlsx_name,similarity_pct,field,type,xlsx_value,db_value');
+  csvLines.push('## SIN MATCH — sin listing_id y similitud < threshold');
+  csvLines.push('listing_id,db_name,xlsx_name,match_method,similarity_pct,field,type,xlsx_value,db_value');
   for (const r of results.no_match) {
     const simPct = r.best_score != null ? `${(r.best_score * 100).toFixed(1)}%` : '';
     csvLines.push([
-      '',
-      esc(r.best_db_name),
-      esc(r.xlsx_name),
-      simPct,
-      'NO_MATCH',
-      '',
-      '',
-      '',
+      '', esc(r.best_db_name), esc(r.xlsx_name), 'fuzzy', simPct,
+      'NO_MATCH', '', '', '',
     ].join(','));
   }
 
-  // Section 3: unknown columns (AC5)
   if (unknownCols.length > 0) {
     csvLines.push('');
     csvLines.push('## COLUMNAS NUEVAS EN XLSX — no existen en el esquema actual');
