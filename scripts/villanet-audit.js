@@ -5,7 +5,8 @@
  * Auditoría de integridad: compara los campos Villanet del archivo maestro
  * (.xlsx de Robbie) contra la tabla listings de la DB.
  *
- * Solo procesa registros donde: villanet_enabled = true AND is_listed = true
+ * Solo procesa registros donde: villanet_enabled = true
+ * El campo is_listed se audita y actualiza según la columna "Villa Net Listing Status" del xlsx.
  *
  * Matching:
  *   - Si la fila del xlsx tiene columna "listing_id" con valor → match directo por ID
@@ -103,6 +104,8 @@ const FIELD_MAP = [
   ['VILLA NET TENNIS',                   'villanet_tennis',                     'bool'],
   ['VILLA NET GOLF CART INCLUDED',       'villanet_golf_cart_included',         'bool'],
   ['VILLA NET HEATED POOL',              'villanet_heated_pool',                'bool'],
+  // Listing status: "Active" → true, "In-Active" → false
+  ['Villa Net Listing Status',           'is_listed',                           'listing_status'],
 ];
 
 const ACTIVE_FIELD_MAP = FIELD_ONLY
@@ -167,13 +170,19 @@ function normalizeXlsxValue(raw, type) {
     const n = parseFloat(raw);
     return isNaN(n) ? null : n;
   }
+  if (type === 'listing_status') {
+    const s = String(raw).trim().toLowerCase();
+    if (s === 'active')   return true;
+    if (s === 'in-active' || s === 'inactive') return false;
+    return null;
+  }
   const s = String(raw).trim();
   return s === '' || s.toLowerCase() === 'null' ? null : s;
 }
 
 function normalizeDbValue(raw, type) {
   if (raw === null || raw === undefined) return null;
-  if (type === 'bool') {
+  if (type === 'bool' || type === 'listing_status') {
     if (typeof raw === 'boolean') return raw;
     const s = String(raw).trim().toLowerCase();
     return s === 'true' || s === '1' || s === 'yes';
@@ -190,6 +199,7 @@ function valuesMatch(xlsxVal, dbVal, type) {
   if (xlsxVal === null || dbVal === null) return false;
   if (type === 'number') return Math.abs(xlsxVal - dbVal) < 0.001;
   if (type === 'string') return xlsxVal.toLowerCase() === dbVal.toLowerCase();
+  if (type === 'listing_status') return xlsxVal === dbVal;
   return xlsxVal === dbVal;
 }
 
@@ -236,7 +246,6 @@ async function loadFromDB(pool) {
       ${dbCols}
     FROM listings l
     WHERE l.villanet_enabled = true
-      AND l.is_listed = true
     ORDER BY l.name
   `);
   return rows;
@@ -346,7 +355,7 @@ async function main() {
   const dbById = new Map(dbRows.map(r => [r.listing_id, r]));
 
   console.log(`✅  XLSX (catálogo Robbie)          : ${xlsxRows.length} propiedades`);
-  console.log(`✅  DB (villanet_enabled + is_listed): ${dbRows.length} propiedades`);
+  console.log(`✅  DB (villanet_enabled)            : ${dbRows.length} propiedades`);
   console.log(`🔑  Modo matching                   : ${hasIdCol ? 'listing_id directo (con fallback fuzzy)' : 'fuzzy por nombre'}`);
   console.log(`🔎  Fuzzy threshold                 : ${THRESHOLD}${hasIdCol ? ' (solo fallback)' : ''}`);
   console.log(`📋  Campos auditados                : ${ACTIVE_FIELD_MAP.length}`);
@@ -388,7 +397,7 @@ async function main() {
         results.id_not_in_db.push({
           xlsx_name:    xlsxRow.xlsxName,
           listing_id:   xlsxRow.xlsxListingId,
-          reason:       'not in DB active view (villanet_enabled=true AND is_listed=true)',
+          reason:       'not in DB (villanet_enabled=false or listing not found)',
         });
         continue;
       }
