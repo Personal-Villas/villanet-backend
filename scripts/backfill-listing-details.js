@@ -2,9 +2,10 @@
 /**
  * backfill-listing-details.js
  *
- * Rellena campos faltantes (bedrooms, bathrooms, max_guests, min_nights,
- * price_usd, location_text, lat, lng) en listings activas de la DB
- * consultando la API de Guesty.
+ * Rellena campos faltantes en listings activas de la DB consultando la API
+ * de Guesty. Cubre campos escalares (bedrooms, bathrooms, max_guests,
+ * min_nights, price_usd, location_text, city, country, lat, lng, description)
+ * e imágenes (images_json, hero_image_url, villanet_hero_images).
  *
  * Es IDEMPOTENTE: solo toca filas donde al menos uno de los campos
  * objetivo está NULL. Si ya están todos completos, no hace nada.
@@ -61,8 +62,16 @@ const IS_DRY_RUN  = !args.apply;
 const RESYNC_ALL  = args.all;
 const SINGLE_ID   = args.id?.trim() || null;
 
-// Campos que este script puede rellenar (en orden de prioridad visual)
-const TRACKED_FIELDS = ['bedrooms', 'bathrooms', 'max_guests', 'min_nights', 'price_usd', 'location_text', 'lat', 'lng'];
+// Campos escalares que el script puede rellenar desde Guesty.
+// Las imágenes se manejan por separado porque tienen lógica propia.
+const TRACKED_FIELDS = [
+  'bedrooms', 'bathrooms', 'max_guests', 'min_nights',
+  'price_usd', 'location_text', 'city', 'country',
+  'lat', 'lng', 'description',
+];
+
+// Campos de imágenes — se verifican y actualizan juntos
+const IMAGE_FIELDS = ['images_json', 'hero_image_url', 'villanet_hero_images'];
 
 const BATCH_SIZE  = 10;   // Conservador: cada llamada a Guesty trae el listing completo
 const PAUSE_MS    = 1500; // 1.5s entre batches para no saturar la API
@@ -88,7 +97,7 @@ const pool = new Pool({
   idleTimeoutMillis:       1000000,
 });
 
-// ── Extraer campos desde el listing de Guesty ─────────────────────────────────
+// ── Extraer campos escalares desde el listing de Guesty ──────────────────────
 function extractFields(listing) {
   const addr = listing?.address || {};
 
@@ -96,13 +105,13 @@ function extractFields(listing) {
   if (listing?.prices?.basePrice)              price = Number(listing.prices.basePrice);
   else if (listing?.pricingSettings?.basePrice) price = Number(listing.pricingSettings.basePrice);
 
-  const lat = listing?.address?.lat ?? listing?.address?.latitude  ?? null;
-  const lng = listing?.address?.lng ?? listing?.address?.longitude ?? null;
+  const lat = addr.lat ?? addr.latitude  ?? null;
+  const lng = addr.lng ?? addr.longitude ?? null;
 
-  const locationParts = [
-    addr.city || addr.neighbourhood,
-    addr.country || addr.countryCode,
-  ].filter(Boolean);
+  const city    = addr.city || addr.neighbourhood || null;
+  const country = addr.country || addr.countryCode || null;
+
+  const locationParts = [city, country].filter(Boolean);
 
   return {
     bedrooms:      listing?.bedrooms      ?? null,
@@ -113,25 +122,47 @@ function extractFields(listing) {
                 ?? null,
     price_usd:     price,
     location_text: addr.full || locationParts.join(', ') || null,
+    city,
+    country,
     lat:           lat != null ? parseFloat(lat) : null,
     lng:           lng != null ? parseFloat(lng) : null,
+    description:   listing?.publicDescription?.summary
+                ?? listing?.publicDescription?.space
+                ?? listing?.description
+                ?? null,
   };
+}
+
+// ── Extraer imágenes desde el listing de Guesty ───────────────────────────────
+function extractImages(listing) {
+  let urls = [];
+  try {
+    // extractImageUrlsFromListing puede no estar disponible — fallback manual
+    const pics = listing?.pictures || listing?.images || [];
+    urls = pics
+      .map(p => p?.original || p?.large || p?.regular || p?.url)
+      .filter(url => typeof url === 'string' && url.startsWith('http'));
+  } catch {}
+  return urls;
 }
 
 // ── UPDATE en DB — solo los campos que llegaron con valor ─────────────────────
 async function updateListing(listingId, fields) {
-  // Solo actualiza campos que Guesty devolvió con valor no nulo
   const setClauses = [];
   const values     = [];
 
+  // Campos JSONB — necesitan cast explícito
+  const jsonbFields = new Set(['images_json', 'villanet_hero_images']);
+
   for (const [col, val] of Object.entries(fields)) {
     if (val !== null && val !== undefined) {
-      values.push(val);
-      setClauses.push(`${col} = $${values.length}`);
+      values.push(typeof val === 'object' ? JSON.stringify(val) : val);
+      const cast = jsonbFields.has(col) ? '::jsonb' : '';
+      setClauses.push(`${col} = $${values.length}${cast}`);
     }
   }
 
-  if (!setClauses.length) return 0; // nada que actualizar
+  if (!setClauses.length) return 0;
 
   values.push(listingId);
   const { rowCount } = await pool.query(
@@ -149,7 +180,7 @@ async function main() {
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
 
   console.log('\n═══════════════════════════════════════════════════════════');
-  console.log(' Backfill — Detalles de listings (bedrooms, bathrooms, etc.)');
+  console.log(' Backfill — Detalles e imágenes de listings desde Guesty');
   console.log(` Modo: ${IS_DRY_RUN ? '🔍 DRY-RUN (sin cambios en DB)' : '⚡ APPLY (escribe en DB)'}`);
   if (RESYNC_ALL) console.log(' ⚡  --all: re-sincroniza aunque ya tengan datos');
   if (SINGLE_ID)  console.log(` 🎯  --id: solo ${SINGLE_ID}`);
@@ -187,12 +218,16 @@ async function main() {
     );
     listings = rows;
   } else {
-    // Default: solo los que tienen al menos un campo NULL
-    const nullChecks = TRACKED_FIELDS.map(f => `${f} IS NULL`).join(' OR ');
+    // Default: solo los que tienen al menos un campo NULL (escalares o imágenes)
+    const nullChecks = [
+      ...TRACKED_FIELDS.map(f => `${f} IS NULL`),
+      `(images_json IS NULL OR images_json = '[]'::jsonb)`,
+    ].join(' OR ');
     const { rows } = await pool.query(
       `SELECT listing_id, name,
               bedrooms, bathrooms, max_guests, min_nights,
-              price_usd, location_text, lat, lng
+              price_usd, location_text, city, country, lat, lng, description,
+              images_json, hero_image_url, villanet_hero_images
        FROM listings
        WHERE villanet_enabled = true
          AND is_listed = true
@@ -255,24 +290,43 @@ async function main() {
 
         const fetched = extractFields(guestyListing);
 
-        // Qué campos se van a actualizar (tienen valor en Guesty y eran null en DB o --all)
-        const toUpdate = {};
-        const nullsBefore = [];
-        const willFill    = [];
-        const stillNull   = [];
+        // ── Campos escalares ──────────────────────────────────────────────────
+        const toUpdate  = {};
+        const willFill  = [];
+        const stillNull = [];
 
         for (const f of TRACKED_FIELDS) {
-          const dbVal      = row[f];
-          const guestyVal  = fetched[f];
-          const isNull     = dbVal === null || dbVal === undefined;
-
-          if (isNull) nullsBefore.push(f);
+          const dbVal     = row[f];
+          const guestyVal = fetched[f];
+          const isNull    = dbVal === null || dbVal === undefined;
 
           if ((isNull || RESYNC_ALL) && guestyVal !== null && guestyVal !== undefined) {
             toUpdate[f] = guestyVal;
-            willFill.push(`${f}=${guestyVal}`);
+            willFill.push(`${f}=${String(guestyVal).slice(0, 40)}`);
           } else if (isNull && (guestyVal === null || guestyVal === undefined)) {
             stillNull.push(f);
+          }
+        }
+
+        // ── Imágenes ──────────────────────────────────────────────────────────
+        const needsImages =
+          RESYNC_ALL ||
+          !row.images_json ||
+          (Array.isArray(row.images_json) && row.images_json.length === 0) ||
+          row.images_json === '[]';
+
+        if (needsImages) {
+          const imageUrls = extractImages(guestyListing);
+          if (imageUrls.length > 0) {
+            const heroImages = imageUrls.slice(0, 10).map((url, i) => ({
+              url, order: i, source: 'guesty',
+            }));
+            toUpdate.images_json          = imageUrls;
+            toUpdate.hero_image_url       = imageUrls[0];
+            toUpdate.villanet_hero_images = heroImages;
+            willFill.push(`images(${imageUrls.length})`);
+          } else {
+            stillNull.push('images_json');
           }
         }
 
@@ -292,7 +346,6 @@ async function main() {
           listing_id,
           name,
           fields_updated: Object.keys(toUpdate),
-          values:         toUpdate,
           still_null:     stillNull,
         });
 
