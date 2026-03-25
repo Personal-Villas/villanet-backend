@@ -328,7 +328,7 @@ export const AuthController = {
         console.log(`✅ New user created: ${user.id}`);
       }
 
-      const accessToken = signAccess({ sub: user.id, role: user.role, status: user.status });
+      const accessToken = signAccess({ sub: user.id, role: user.role, status: user.status, email: user.email  });
       const refreshToken = signRefresh(user.id);
       
       await pool.query(
@@ -357,7 +357,8 @@ export const AuthController = {
           role: user.role, 
           status: user.status, 
           trial_expires_at: user.trial_expires_at,
-          full_name: user.full_name 
+          full_name: user.full_name,
+          avatar_url: user.avatar_url ?? null
         }
       });
     } catch (err) {
@@ -422,7 +423,7 @@ export const AuthController = {
       return res.status(403).json({ message: 'Trial expired. Await admin approval.' });
     }
 
-    const accessToken = signAccess({ sub: user.id, role: user.role, status: user.status });
+    const accessToken = signAccess({ sub: user.id, role: user.role, status: user.status, email: user.email  });
     const refreshToken = signRefresh(user.id);
     await pool.query(
       `INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1,$2, CURRENT_TIMESTAMP + interval '${REFRESH_TTL_DAYS} days')`,
@@ -432,7 +433,7 @@ export const AuthController = {
 
     res.json({
       accessToken,
-      user: { id: user.id, email: user.email, role: user.role, status: user.status, trial_expires_at: user.trial_expires_at, full_name: user.full_name }
+      user: { id: user.id, email: user.email, role: user.role, status: user.status, trial_expires_at: user.trial_expires_at, full_name: user.full_name, avatar_url: user.avatar_url ?? null }
     });
   },
 
@@ -449,7 +450,7 @@ export const AuthController = {
 
     try {
       jwt.verify(token, process.env.JWT_REFRESH_SECRET);
-      const accessToken = signAccess({ sub: rows[0].user_id, role: rows[0].role, status: rows[0].status });
+      const accessToken = signAccess({ sub: rows[0].user_id, role: rows[0].role, status: rows[0].status, email: rows[0].email });
       return res.json({ accessToken });
     } catch {
       return res.status(401).json({ message: 'Refresh invalid' });

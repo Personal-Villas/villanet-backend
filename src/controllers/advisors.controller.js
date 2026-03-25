@@ -145,7 +145,7 @@ export const advisorsController = {
       }
 
       // 4. ✅ Firmar con JWT_ACCESS_SECRET (igual que auth_controller) para que /auth/me lo acepte
-      const accessToken  = signAccess({ sub: user.id, role: user.role, status: user.status });
+      const accessToken  = signAccess({ sub: user.id, role: user.role, status: user.status, email: user.email  });
       const refreshToken = signRefresh(user.id);
 
       // 5. Persistir refresh token
@@ -187,5 +187,120 @@ export const advisorsController = {
         message: 'Internal server error during advisor registration'
       });
     }
+  },
+
+  // GET /advisors/profile
+  // Requiere: auth() middleware
+  async getProfile(req, res) {
+    console.log('getProfile called, req.user:', req.user); 
+    try {
+      const email = req.user?.email;
+      console.log('Looking up email:', email);
+      if (!email) return res.status(401).json({ success: false, message: 'Unauthorized' });
+ 
+      const profile = await Advisor.getProfileByEmail(email);
+      if (!profile) {
+        return res.status(404).json({ success: false, message: 'Advisor profile not found' });
+      }
+ 
+      res.json({ success: true, profile });
+    } catch (error) {
+      console.error('Get advisor profile error:', error);
+      res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+  },
+
+  // PATCH /advisors/profile
+  // Requiere: auth() middleware
+  // Body: { website }
+  async updateProfile(req, res) {
+    try {
+      const email = req.user?.email;
+      if (!email) return res.status(401).json({ success: false, message: 'Unauthorized' });
+ 
+      const { website } = req.body;
+ 
+      const updated = await Advisor.updateProfile(email, { website });
+      if (!updated) {
+        return res.status(404).json({ success: false, message: 'Advisor not found' });
+      }
+ 
+      res.json({ success: true, profile: updated });
+    } catch (error) {
+      console.error('Update advisor profile error:', error);
+      res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+  },
+ 
+  // POST /advisors/profile/logo
+  // Requiere: auth() middleware + uploadLogo middleware
+  // Field: agency_logo (file)
+  async updateLogo(req, res) {
+    try {
+      const email = req.user?.email;
+      const userId = req.user?.sub;
+      if (!email || !userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
+ 
+      if (!req.file) {
+        return res.status(400).json({ success: false, message: 'No file provided' });
+      }
+ 
+      // 1. Obtener el avatar_url actual para borrar el viejo de S3
+      const { rows } = await pool.query(
+        'SELECT avatar_url FROM users WHERE id = $1',
+        [userId]
+      );
+      const oldAvatarUrl = rows[0]?.avatar_url;
+ 
+      // 2. Subir el nuevo logo a S3
+      const newAvatarUrl = await uploadToS3(
+        req.file.buffer,
+        req.file.originalname,
+        'imagenes-logos-villanet'
+      );
+ 
+      // 3. Actualizar avatar_url en users
+      await pool.query(
+        'UPDATE users SET avatar_url = $1 WHERE id = $2',
+        [newAvatarUrl, userId]
+      );
+ 
+      // 4. Borrar el viejo de S3 (fire-and-forget)
+      if (oldAvatarUrl && oldAvatarUrl !== newAvatarUrl) {
+        deleteFromS3ByUrl(oldAvatarUrl);
+      }
+ 
+      res.json({ success: true, avatar_url: newAvatarUrl });
+    } catch (error) {
+      console.error('Update advisor logo error:', error);
+      res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+  },
+ 
+  // DELETE /advisors/profile/logo
+  // Requiere: auth() middleware
+  async removeLogo(req, res) {
+    try {
+      const userId = req.user?.sub;
+      if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
+ 
+      const { rows } = await pool.query(
+        'SELECT avatar_url FROM users WHERE id = $1',
+        [userId]
+      );
+      const oldAvatarUrl = rows[0]?.avatar_url;
+ 
+      if (oldAvatarUrl) {
+        deleteFromS3ByUrl(oldAvatarUrl); // fire-and-forget
+      }
+ 
+      await pool.query('UPDATE users SET avatar_url = NULL WHERE id = $1', [userId]);
+ 
+      res.json({ success: true, avatar_url: null });
+    } catch (error) {
+      console.error('Remove advisor logo error:', error);
+      res.status(500).json({ success: false, message: 'Internal server error' });
+    }
   }
 };
+
