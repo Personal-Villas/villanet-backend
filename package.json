@@ -9,6 +9,7 @@
     "sync-listings": "node scripts/sync_listings.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1016.0",
     "axios": "^1.12.2",
     "bcryptjs": "^2.4.3",
     "bottleneck": "^2.19.5",
@@ -20,6 +21,7 @@
     "express": "^4.19.2",
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
+    "multer": "^2.1.1",
     "node-cache": "^5.1.2",
     "node-cron": "^4.2.1",
     "nodemailer": "^7.0.10",
