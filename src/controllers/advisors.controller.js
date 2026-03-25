@@ -2,6 +2,7 @@ import { Advisor } from '../models/Advisor.js';
 import { pool } from '../db.js';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { uploadToS3, deleteFromS3ByUrl } from '../utils/s3Upload.js';
 
 const REFRESH_TTL_DAYS = Number(process.env.REFRESH_TTL_DAYS || 7);
 const ACCESS_TTL_MIN   = Number(process.env.ACCESS_TTL_MIN  || 15);
@@ -23,6 +24,19 @@ function setRefreshCookie(res, token) {
     path: '/auth/refresh',
     maxAge: REFRESH_TTL_DAYS * 24 * 3600 * 1000,
   });
+}
+
+// ── Normalizar travel_regions ──────────────────────────────────────
+// multipart puede llegar como: string JSON, string simple, array, o undefined
+function parseRegions(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  // Caso: '[\"Caribbean\",\"Mexico\"]'  →  JSON.parse
+  if (typeof raw === 'string' && raw.startsWith('[')) {
+    try { return JSON.parse(raw); } catch { return [raw]; }
+  }
+  // Caso: un solo valor como string simple 'Caribbean'
+  return [raw];
 }
 
 export const advisorsController = {
@@ -62,6 +76,12 @@ export const advisorsController = {
         });
       }
 
+      // Subir logo a S3 si viene en el request (campo opcional)
+      let avatarUrl = null;
+      if (req.file) {
+        avatarUrl = await uploadToS3(req.file.buffer, req.file.originalname, 'imagenes-logos-villanet');
+      }
+
       const saltRounds = 12;
       const password_hash = await bcrypt.hash(password, saltRounds);
       const full_name = `${first_name} ${last_name}`;
@@ -81,7 +101,7 @@ export const advisorsController = {
           email: normalizedEmail,
           password_hash,
           advisor_type:                advisor_type || null,
-          travel_regions:              travel_regions || [],
+          travel_regions:              parseRegions(travel_regions),
           typical_group_size:          typical_group_size || null,
           villa_budget_range:          villa_budget_range || null,
           commission_preference:       commission_preference || null,
@@ -95,17 +115,23 @@ export const advisorsController = {
         // 2. ✅ Crear (o vincular) el user en la tabla users para que /auth/me funcione.
         // ON CONFLICT DO UPDATE para el caso en que ya existiera un user huérfano con ese email.
         const { rows: userRows } = await client.query(
-          `INSERT INTO users (email, full_name, role, status, password_hash, trial_expires_at)
-           VALUES ($1, $2, 'ta', 'approved', $3, NULL)
+          `INSERT INTO users (email, full_name, role, status, password_hash, trial_expires_at, avatar_url)
+           VALUES ($1, $2, 'ta', 'approved', $3, NULL, $4)
            ON CONFLICT (email) DO UPDATE
              SET full_name     = EXCLUDED.full_name,
                  role          = 'ta',
                  status        = 'approved',
-                 password_hash = EXCLUDED.password_hash
-           RETURNING id, email, role, status, full_name, trial_expires_at`,
-          [normalizedEmail, full_name, password_hash]
+                 password_hash = EXCLUDED.password_hash,
+                 avatar_url    = COALESCE(EXCLUDED.avatar_url, users.avatar_url)
+           RETURNING id, email, role, status, full_name, trial_expires_at, avatar_url`,
+          [normalizedEmail, full_name, password_hash, avatarUrl]
         );
         user = userRows[0];
+
+        // Si el usuario ya tenía un logo y subió uno nuevo, borrar el viejo de S3
+        if (avatarUrl && user.avatar_url && user.avatar_url !== avatarUrl) {
+          deleteFromS3ByUrl(user.avatar_url); // fire-and-forget, no bloquea la respuesta
+        }
 
         // 3. ✅ Opcional: guardar la referencia cruzada si la tabla advisors tiene columna user_id
         // await client.query(`UPDATE advisors SET user_id = $1 WHERE id = $2`, [user.id, newAdvisor.id]);
