@@ -10,7 +10,7 @@ const s3 = new S3Client({
   },
 });
 
-const BUCKET = process.env.S3_BUCKET_NAME;
+const BUCKET = process.env.AWS_BUCKET_NAME;
 
 /**
  * Sube un archivo a S3 y devuelve su URL pública.
