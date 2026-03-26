@@ -225,7 +225,7 @@ export async function createQuote(req, res) {
       `INSERT INTO quotes (created_by_user_id, guest_first_name, guest_last_name, travel_advisor_email, guest_email, check_in, check_out, guests, status)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft') RETURNING id, created_at`,
       [
-        req.user?.id || null,
+        req.user?.sub || null,
         guestFirstName?.trim() || null,
         guestLastName?.trim() || null,
         travelAdvisorEmail?.trim() || null,
@@ -255,7 +255,7 @@ export async function createQuote(req, res) {
 
     await client.query(
       `INSERT INTO quote_history (quote_id, event_type, actor_user_id, payload) VALUES ($1, 'CREATED', $2, $3)`,
-      [quoteId, req.user?.id || null, JSON.stringify({
+      [quoteId, req.user?.sub || null, JSON.stringify({
         itemsCount: items.length, guestFirstName, guestLastName,
         travelAdvisorEmail, guestEmail, checkIn, checkOut,
       })]
@@ -326,7 +326,7 @@ export async function sendQuoteEmail(req, res) {
       guestEmail, checkIn, checkOut, guests, items,
     } = req.body;
 
-    const userId = req.user?.id;
+    const userId = req.user?.sub;
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
     // Validaciones → 400 estandarizado
@@ -444,10 +444,31 @@ export async function sendQuoteEmail(req, res) {
     const pmLogoUrl = itemsWithFullData[0]?.pm_logo_url || null;
     const pmName    = itemsWithFullData[0]?.pm_name || "villanet";
 
+    // ── TA branding: avatar_url, full_name (users) + first_name (advisors) ────
+    let taLogoUrl    = null;
+    let taName       = null;
+    let taFirstName  = null;
+    if (userId) {
+      const taResult = await client.query(
+        `SELECT u.avatar_url, u.full_name, u.email, a.first_name
+         FROM users u
+         LEFT JOIN advisors a ON LOWER(a.email) = LOWER(u.email)
+         WHERE u.id = $1`,
+        [userId]
+      );
+      if (taResult.rows.length > 0) {
+        const row    = taResult.rows[0];
+        taLogoUrl    = row.avatar_url?.trim()  || null;
+        taName       = row.full_name?.trim()   || null;
+        taFirstName  = row.first_name?.trim()  || null;
+      }
+    }
+
     // ── Envío de emails con manejo de error PARCIAL ──────────────────────────
     const advisorHtml = await generateQuoteEmailHtml(
       { ...quote, recipient_type: "advisor" },
-      itemsWithFullData, nights, checkInYmd, checkOutYmd, pmLogoUrl, pmName
+      itemsWithFullData, nights, checkInYmd, checkOutYmd, pmLogoUrl, pmName,
+      taLogoUrl, taName, taFirstName
     );
 
     let advisorEmailSent = false;
@@ -470,7 +491,8 @@ export async function sendQuoteEmail(req, res) {
       try {
         const guestHtml = await generateQuoteEmailHtml(
           { ...quote, recipient_type: "guest" },
-          itemsWithFullData, nights, checkInYmd, checkOutYmd, pmLogoUrl, pmName
+          itemsWithFullData, nights, checkInYmd, checkOutYmd, pmLogoUrl, pmName,
+          taLogoUrl, taName, taFirstName
         );
         await sendEmail({
           to: quote.guest_email,
@@ -584,6 +606,9 @@ export async function generateQuoteEmailHtml(
   checkOutYmd,
   pmLogoUrl = null,
   pmName = "villanet",
+  taLogoUrl = null,
+  taName = null,
+  taFirstName = null,
 ) {
   const formatDate = (dateStr) => {
     if (!dateStr) return "Flexible Dates";
@@ -610,7 +635,7 @@ export async function generateQuoteEmailHtml(
   const isGuest = quote.recipient_type === "guest";
   const greeting = isGuest
     ? `Hello, ${quote.guest_first_name}`
-    : `Hello, Travel Advisor`;
+    : `Hello, ${taFirstName || "Travel Advisor"}`;
   const intro = isGuest
     ? `Here are your curated villa options, handpicked based on your preferences.`
     : `Here is the quote prepared for your client, <strong style="font-weight:600;">${quote.guest_first_name} ${quote.guest_last_name}</strong>.`;
@@ -623,7 +648,20 @@ export async function generateQuoteEmailHtml(
   const iconNight = `<img src="https://img.icons8.com/?size=100&id=660&format=png&color=71717a"    width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
   const iconGuest = `<img src="https://img.icons8.com/?size=100&id=fEZo4zNy3Mqa&format=png&color=71717a" width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
 
-  const logo = '<img src="https://imagenes-logos-villanet.s3.us-east-1.amazonaws.com/logo-villanet.png" alt="VillaNet" width="160" style="display:block;margin:0 auto;max-height:50px;width:auto;" border="0">';
+  // ── Header branding: TA logo > TA name > VillaNet logo (fallback) ──────────
+  let headerBrandHtml;
+  if (taLogoUrl) {
+    // Escenario A: TA tiene logo cargado
+    headerBrandHtml = `<img src="${taLogoUrl}" alt="Agency Logo"
+      style="display:block;margin:0 auto;max-width:220px;max-height:80px;width:auto;height:auto;" border="0">`;
+  } else if (taName) {
+    // Escenario B: TA tiene nombre pero no logo
+    headerBrandHtml = `<p style="margin:0;font-size:22px;font-weight:700;letter-spacing:0.01em;color:#09090b;font-family:Georgia,'Times New Roman',serif;">${taName}</p>`;
+  } else {
+    // Fallback final: logo de VillaNet
+    headerBrandHtml = `<img src="https://imagenes-logos-villanet.s3.us-east-1.amazonaws.com/logo-villanet.png" alt="VillaNet"
+      width="160" style="display:block;margin:0 auto;max-height:50px;width:auto;" border="0">`;
+  }
 
   // ── Inline style constants (mantienen consistencia y sobreviven forward) ──
   const S = {
@@ -871,7 +909,7 @@ btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;fo
                 <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
                   <tr>
                     <td style="padding:0;text-align:center;">
-                      ${logo}
+                      ${headerBrandHtml}
                     </td>
                   </tr>
                 </table>
