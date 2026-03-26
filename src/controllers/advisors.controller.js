@@ -301,6 +301,58 @@ export const advisorsController = {
       console.error('Remove advisor logo error:', error);
       res.status(500).json({ success: false, message: 'Internal server error' });
     }
-  }
-};
+  },
 
+  // ── CHANGE PASSWORD ────────────────────────────────────────────────────────
+  // POST /advisors/profile/change-password
+  // Requiere: auth() middleware (usuario ya logueado)
+  // Body: { currentPassword, newPassword }
+  async changePassword(req, res) {
+    try {
+      const userId = req.user?.sub;
+      if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+      const { currentPassword, newPassword } = req.body || {};
+      if (!currentPassword || !newPassword) {
+        return res.status(400).json({ success: false, message: 'currentPassword and newPassword are required' });
+      }
+      if (String(newPassword).length < 8) {
+        return res.status(400).json({ success: false, message: 'Password must be at least 8 characters' });
+      }
+
+      // Obtener el hash actual
+      const { rows } = await pool.query(
+        'SELECT password_hash FROM users WHERE id = $1',
+        [userId]
+      );
+
+      if (!rows.length) {
+        return res.status(404).json({ success: false, message: 'User not found' });
+      }
+
+      const existingHash = rows[0].password_hash;
+
+      // Si el usuario no tiene contraseña (solo usó código), el campo puede estar vacío
+      if (!existingHash) {
+        return res.status(400).json({ success: false, message: 'No password set. Please use forgot password to create one.' });
+      }
+
+      const isMatch = await bcrypt.compare(String(currentPassword), existingHash);
+      if (!isMatch) {
+        return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+      }
+
+      const newHash = await bcrypt.hash(String(newPassword), 12);
+      await pool.query(
+        'UPDATE users SET password_hash = $1 WHERE id = $2',
+        [newHash, userId]
+      );
+
+      console.log(`✅ change-password OK for user ${userId}`);
+      res.json({ success: true, message: 'Password updated successfully' });
+    } catch (error) {
+      console.error('Change password error:', error);
+      res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+  },
+};

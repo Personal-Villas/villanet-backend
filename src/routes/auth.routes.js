@@ -12,6 +12,11 @@ r.post('/verify-code', AuthController.verifyCode);
 r.post('/register', AuthController.register);
 r.post('/login',    AuthController.login);
 
+// ── Password reset (públicos) ──────────────────────────────────────────────
+r.post('/forgot-password',    AuthController.forgotPassword);
+r.post('/verify-reset-code',  AuthController.verifyResetCode);
+r.post('/reset-password',     AuthController.resetPassword);
+
 // Endpoints comunes
 r.post('/refresh',  AuthController.refresh);
 r.post('/logout',   auth(false), AuthController.logout);
