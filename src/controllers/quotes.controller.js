@@ -375,7 +375,17 @@ export async function sendQuoteEmail(req, res) {
 
 `SELECT qi.*,
         COALESCE(qi.guesty_booking_domain, l.guesty_booking_domain) AS guesty_booking_domain,
-        pm.logo_url as pm_logo_url, pm.name as pm_name
+        pm.logo_url as pm_logo_url, pm.name as pm_name,
+        l.amenities_json,
+        l.villanet_chef_included,
+        l.villanet_cook_included,
+        l.villanet_waiter_butler_included,
+        l.villanet_private_gym,
+        l.villanet_private_cinema,
+        l.villanet_pickleball,
+        l.villanet_tennis,
+        l.villanet_golf_cart_included,
+        l.villanet_golf_villa
  FROM quote_items qi
  LEFT JOIN listings l ON qi.listing_id = l.listing_id
  LEFT JOIN listing_property_managers pm ON l.listing_property_manager_id = pm.id
@@ -647,6 +657,8 @@ export async function generateQuoteEmailHtml(
   const iconCal   = `<img src="https://img.icons8.com/?size=100&id=23&format=png&color=71717a"     width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
   const iconNight = `<img src="https://img.icons8.com/?size=100&id=660&format=png&color=71717a"    width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
   const iconGuest = `<img src="https://img.icons8.com/?size=100&id=fEZo4zNy3Mqa&format=png&color=71717a" width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
+  const iconCheck =`<img src="https://img.icons8.com/?size=100&id=25534&format=png&color=000000"width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
+  const iconStars =`<img src="https://img.icons8.com/?size=100&id=0O4DSMrBu10j&format=png&color=000000"width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
 
   // ── Header branding: TA logo > TA name > VillaNet logo (fallback) ──────────
   let headerBrandHtml;
@@ -727,6 +739,92 @@ btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;fo
       </td>`)
     .join("");
 
+  // ── Villa services helpers ────────────────────────────────────────────────
+
+  /**
+   * Builds the "What's Included" + "Enhance Your Stay" block for a villa card.
+   * Reads the villanet_* boolean columns from the listings row (already joined).
+   */
+  function buildServicesBlock(item) {
+    // Map each service to a human-readable label
+    const SERVICES = [
+      { key: "villanet_chef_included",         label: "Private Chef"},
+      { key: "villanet_cook_included",          label: "Cook"},
+      { key: "villanet_waiter_butler_included", label: "Waiter / Butler"},
+      { key: "villanet_private_gym",            label: "Private Gym"},
+      { key: "villanet_private_cinema",         label: "Private Cinema"},
+      { key: "villanet_pickleball",             label: "Pickleball Court"},
+      { key: "villanet_tennis",                 label: "Tennis Court",},
+      // Golf cart is relevant when the property is a golf villa OR explicitly included
+      { key: "villanet_golf_cart_included",     label: "Golf Cart",},
+    ];
+
+    // Extras copy — placeholder text until Robbie/Jhony provides the final copy
+    const EXTRAS_COPY = {
+      villanet_chef_included:         "Elevate your stay with a Private Chef — available upon request to craft personalized menus for every occasion.",
+      villanet_cook_included:         "A professional Cook can be arranged for your stay to prepare daily meals. Ask your travel advisor for details.",
+      villanet_waiter_butler_included:"A dedicated Butler/Waiter service is available to ensure seamless hospitality throughout your stay.",
+      villanet_private_gym:           "A fully equipped Private Gym can be set up on request, tailored to your fitness routine.",
+      villanet_private_cinema:        "Enjoy a Private Cinema experience at this property — available upon request for movie nights and events.",
+      villanet_pickleball:            "Pickleball equipment and court setup are available upon request for guests who love an active stay.",
+      villanet_tennis:                "Professional tennis equipment and court access can be arranged — inquire with your travel advisor.",
+      villanet_golf_cart_included:    "A Golf Cart can be arranged for easy on-property and neighborhood transport. Ask your advisor for rates.",
+    };
+
+    const included = [];
+    const extras   = [];
+
+    for (const svc of SERVICES) {
+      // Special case: golf cart — show as included only when villanet_golf_villa is also true
+      if (svc.key === "villanet_golf_cart_included") {
+        if (item[svc.key] === true || item.villanet_golf_villa === true) {
+          included.push(svc);
+        } else {
+          extras.push(svc);
+        }
+        continue;
+      }
+      if (item[svc.key] === true) {
+        included.push(svc);
+      } else {
+        // Only surface as an extra if the column exists on the row (not NULL = no data)
+        if (item[svc.key] === false) {
+          extras.push(svc);
+        }
+      }
+    }
+
+    // If no data at all, skip the whole block
+    if (included.length === 0 && extras.length === 0) return "";
+
+    const badgeStyle  = "display: inline-block;background-color: #ffffff;color: #111827;border: 1px solid #e5e7eb;border-radius: 20px;padding: 4px 12px;font-size: 11px;font-weight: 600;margin: 3px 4px 3px 0;white-space: nowrap;letter-spacing: 0.025em;";
+    const sectionHead = "font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#71717a;margin:0 0 8px 0;";
+    const divider     = `<div style="height:1px;background-color:#f0f0f0;margin:14px 0;"></div>`;
+
+    let html = `<div style="margin:14px 0 18px 0;">`;
+
+    if (included.length > 0) {
+      html += `<p style="${sectionHead}">${iconCheck} What's Included</p>`;
+      html += `<div>`;
+      for (const svc of included) {
+        html += `<span style="${badgeStyle}">${svc.label}</span>`;
+      }
+      html += `</div>`;
+    }
+
+    if (extras.length > 0) {
+      if (included.length > 0) html += divider;
+      html += `<p style="${sectionHead}">${iconStars}Enhance Your Stay</p>`;
+      for (const svc of extras) {
+        const copy = EXTRAS_COPY[svc.key] || `${svc.label} services are available for this property upon request.`;
+        html += `<p style="font-size:12px;color:#52525b;margin:0 0 6px 0;line-height:1.5;"><strong style="color:#09090b;">${svc.label}:</strong> ${copy}</p>`;
+      }
+    }
+
+    html += `</div>`;
+    return html;
+  }
+
   // ── Villa cards ───────────────────────────────────────────────────────────
   const cardsHtml = items
     .map((item) => {
@@ -786,6 +884,9 @@ btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;fo
           <!-- Meta -->
           <p style="${S.cardMetaP}">${iconPin}${item.listing_location || ""}</p>
           <p style="${S.cardMetaP}">${iconBed}${item.bedrooms} Bedrooms &nbsp;&middot;&nbsp; ${iconBath}${item.bathrooms} Bathrooms</p>
+
+          <!-- Services: included + extras -->
+          ${buildServicesBlock(item)}
 
           <!-- Breakdown box -->
           <table cellpadding="0" cellspacing="0" border="0" style="${S.bdTable}">
