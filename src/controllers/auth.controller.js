@@ -476,5 +476,210 @@ export const AuthController = {
     );
     if (!rows.length) return res.status(404).json({ message: 'Not found' });
     res.json(rows[0]);
-  }
+  },
+
+  // ── FORGOT PASSWORD ────────────────────────────────────────────────────────
+  // POST /auth/forgot-password
+  // Público. Genera un código de 6 dígitos y lo envía al email registrado.
+  // Reutiliza la tabla password_reset_codes (ver SQL en docs).
+  // Siempre responde 200 para no revelar si el email existe o no (seguridad).
+  async forgotPassword(req, res) {
+    const { email } = req.body || {};
+    if (!email) return res.status(400).json({ message: 'Email required' });
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    try {
+      // Verificar si el usuario existe — pero NO revelarlo en la respuesta
+      const { rows: userRows } = await pool.query(
+        `SELECT id FROM users WHERE email = $1`,
+        [normalizedEmail]
+      );
+
+      // Si el email no existe, responder igual para no filtrar información
+      if (!userRows.length) {
+        console.log(`🔒 forgot-password: email not found (${normalizedEmail}), silent response`);
+        return res.json({ message: 'If that email exists, a code was sent.' });
+      }
+
+      const userId = userRows[0].id;
+      const code = generateCode();
+      const codeHash = hashCode(code);
+
+      console.log(`🔐 forgot-password code for ${normalizedEmail}: ${code}`);
+
+      // Guardar (o reemplazar) el código en password_reset_codes
+      // ON CONFLICT sobre user_id: un solo código activo por usuario a la vez
+      await pool.query(
+        `INSERT INTO password_reset_codes (user_id, code_hash, expires_at)
+         VALUES ($1, $2, CURRENT_TIMESTAMP + interval '15 minutes')
+         ON CONFLICT (user_id) DO UPDATE
+           SET code_hash  = EXCLUDED.code_hash,
+               expires_at = EXCLUDED.expires_at,
+               reset_token = NULL,
+               used_at     = NULL`,
+        [userId, codeHash]
+      );
+
+      // Reusar el transporter existente con template consistente con el resto
+      const mailOptions = {
+        from: process.env.SMTP_FROM || '"Villanet" <noreply@villanet.com>',
+        to: normalizedEmail,
+        subject: 'Reset your Villanet password',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #000;">Reset your password</h2>
+            <p style="font-size: 16px; color: #333;">Enter this code to reset your Villanet password:</p>
+            <div style="background: #f5f5f5; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0;">
+              <h1 style="font-size: 32px; letter-spacing: 8px; margin: 0; color: #000;">${code}</h1>
+            </div>
+            <p style="font-size: 14px; color: #666;">This code expires in 15 minutes.</p>
+            <p style="font-size: 14px; color: #666;">If you didn't request a password reset, you can safely ignore this email.</p>
+          </div>
+        `,
+      };
+
+      await transporter.sendMail(mailOptions);
+      console.log(`✅ forgot-password code sent to ${normalizedEmail}`);
+
+      res.json({ message: 'If that email exists, a code was sent.' });
+    } catch (err) {
+      console.error('❌ forgot-password error:', err);
+      res.status(500).json({ message: 'Failed to send reset code' });
+    }
+  },
+
+  // ── VERIFY RESET CODE ──────────────────────────────────────────────────────
+  // POST /auth/verify-reset-code
+  // Público. Valida el código de 6 dígitos. Si es correcto, devuelve un
+  // resetToken UUID de un solo uso (5 min de vida) para el paso siguiente.
+  async verifyResetCode(req, res) {
+    const { email, code } = req.body || {};
+    if (!email || !code) return res.status(400).json({ message: 'Email and code required' });
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    try {
+      const { rows } = await pool.query(
+        `SELECT prc.id, prc.code_hash, prc.expires_at, prc.used_at, prc.attempts
+         FROM password_reset_codes prc
+         JOIN users u ON u.id = prc.user_id
+         WHERE u.email = $1`,
+        [normalizedEmail]
+      );
+
+      if (!rows.length) {
+        return res.status(400).json({ message: 'No reset code found for this email' });
+      }
+
+      const record = rows[0];
+
+      if (record.used_at) {
+        return res.status(400).json({ message: 'This code has already been used' });
+      }
+
+      if (new Date(record.expires_at) < new Date()) {
+        return res.status(400).json({ message: 'Code expired. Please request a new one.' });
+      }
+
+      if (record.attempts >= 5) {
+        return res.status(429).json({ message: 'Too many attempts. Please request a new code.' });
+      }
+
+      const isValid = verifyHashedCode(String(code), record.code_hash);
+
+      if (!isValid) {
+        await pool.query(
+          `UPDATE password_reset_codes SET attempts = attempts + 1 WHERE id = $1`,
+          [record.id]
+        );
+        const remaining = 5 - (record.attempts + 1);
+        return res.status(400).json({ message: `Invalid code. ${remaining} attempts remaining.` });
+      }
+
+      // Código válido: generar resetToken UUID de un solo uso (5 min)
+      const resetToken = crypto.randomBytes(32).toString('hex');
+      await pool.query(
+        `UPDATE password_reset_codes
+         SET reset_token = $1,
+             expires_at  = CURRENT_TIMESTAMP + interval '5 minutes',
+             attempts    = 0
+         WHERE id = $2`,
+        [resetToken, record.id]
+      );
+
+      console.log(`✅ verify-reset-code OK for ${normalizedEmail}, resetToken issued`);
+      res.json({ resetToken });
+    } catch (err) {
+      console.error('❌ verify-reset-code error:', err);
+      res.status(500).json({ message: 'Verification failed' });
+    }
+  },
+
+  // ── RESET PASSWORD ─────────────────────────────────────────────────────────
+  // POST /auth/reset-password
+  // Público. Recibe el resetToken del paso anterior y la nueva contraseña.
+  // Actualiza el hash en users e invalida el token.
+  async resetPassword(req, res) {
+    const { resetToken, newPassword } = req.body || {};
+    if (!resetToken || !newPassword) {
+      return res.status(400).json({ message: 'resetToken and newPassword required' });
+    }
+    if (String(newPassword).length < 8) {
+      return res.status(400).json({ message: 'Password must be at least 8 characters' });
+    }
+
+    try {
+      // Buscar el token y verificar que no esté usado ni expirado
+      const { rows } = await pool.query(
+        `SELECT prc.id, prc.used_at, prc.expires_at, u.id AS user_id
+         FROM password_reset_codes prc
+         JOIN users u ON u.id = prc.user_id
+         WHERE prc.reset_token = $1`,
+        [resetToken]
+      );
+
+      if (!rows.length) {
+        return res.status(400).json({ message: 'Invalid or expired token' });
+      }
+
+      const record = rows[0];
+
+      if (record.used_at) {
+        return res.status(400).json({ message: 'This token has already been used' });
+      }
+
+      if (new Date(record.expires_at) < new Date()) {
+        return res.status(400).json({ message: 'Token expired. Please start over.' });
+      }
+
+      // Hashear la nueva contraseña e invalidar el token en la misma transacción
+      const newHash = await bcrypt.hash(String(newPassword), 12);
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `UPDATE users SET password_hash = $1 WHERE id = $2`,
+          [newHash, record.user_id]
+        );
+        await client.query(
+          `UPDATE password_reset_codes SET used_at = CURRENT_TIMESTAMP, reset_token = NULL WHERE id = $1`,
+          [record.id]
+        );
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+
+      console.log(`✅ reset-password OK for user ${record.user_id}`);
+      res.json({ message: 'Password updated successfully' });
+    } catch (err) {
+      console.error('❌ reset-password error:', err);
+      res.status(500).json({ message: 'Failed to reset password' });
+    }
+  },
 };

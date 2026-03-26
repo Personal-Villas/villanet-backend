@@ -10,9 +10,10 @@ const router = express.Router();
 router.post('/signup', uploadLogo, advisorsController.signup);
 
 // ── Protegidas (requieren JWT válido) ──────────────────────────────────────
-router.get   ('/profile',      auth(),             advisorsController.getProfile);
-router.patch ('/profile',      auth(),             advisorsController.updateProfile);
-router.post  ('/profile/logo', auth(), uploadLogo, advisorsController.updateLogo);
-router.delete('/profile/logo', auth(),             advisorsController.removeLogo);
+router.get   ('/profile',                auth(),             advisorsController.getProfile);
+router.patch ('/profile',                auth(),             advisorsController.updateProfile);
+router.post  ('/profile/logo',           auth(), uploadLogo, advisorsController.updateLogo);
+router.delete('/profile/logo',           auth(),             advisorsController.removeLogo);
+router.post  ('/profile/change-password', auth(),            advisorsController.changePassword);
 
 export default router;
