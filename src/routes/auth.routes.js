@@ -5,7 +5,8 @@ import { auth } from '../middleware/auth.js';
 const r = Router();
 
 // Nuevos endpoints passwordless
-r.post('/send-code',   AuthController.sendCode);
+r.post('/check-email', AuthController.checkEmail);
+// r.post('/send-code',   AuthController.sendCode);
 r.post('/verify-code', AuthController.verifyCode);
 
 // Endpoints legacy (mantener para compatibilidad)

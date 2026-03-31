@@ -1,10 +1,13 @@
-import { pool } from '../db.js';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import nodemailer from 'nodemailer';
-import crypto from 'crypto';
-import { Roles, Status } from '../types.js';
-import { sendAccessNotification, notifySafely } from '../services/discordNotification.service.js'
+import { pool } from "../db.js";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import nodemailer from "nodemailer";
+import crypto from "crypto";
+import { Roles, Status } from "../types.js";
+import {
+  sendAccessNotification,
+  notifySafely,
+} from "../services/discordNotification.service.js";
 
 const ACCESS_TTL_MIN = Number(process.env.ACCESS_TTL_MIN || 15);
 const REFRESH_TTL_DAYS = Number(process.env.REFRESH_TTL_DAYS || 7);
@@ -22,12 +25,10 @@ const transporter = nodemailer.createTransport({
 
 // 🆕 Función para hashear códigos
 function hashCode(code) {
-  const secret = process.env.CODE_HASH_SECRET || 'fallback-secret-for-development';
-  const hash = crypto
-    .createHmac('sha256', secret)
-    .update(code)
-    .digest('hex');
-  
+  const secret =
+    process.env.CODE_HASH_SECRET || "fallback-secret-for-development";
+  const hash = crypto.createHmac("sha256", secret).update(code).digest("hex");
+
   console.log(`🔐 Hash generated for code: ${code} -> ${hash}`);
   return hash;
 }
@@ -36,35 +37,39 @@ function hashCode(code) {
 function verifyHashedCode(plainCode, hashedCode) {
   try {
     const calculatedHash = hashCode(plainCode);
-    
+
     console.log(`🔍 Code verification debug:`, {
       providedCode: plainCode,
       calculatedHash,
       storedHash: hashedCode,
-      match: calculatedHash === hashedCode
+      match: calculatedHash === hashedCode,
     });
-    
+
     return calculatedHash === hashedCode;
   } catch (error) {
-    console.error('❌ Error in verifyCode:', error);
+    console.error("❌ Error in verifyCode:", error);
     return false;
   }
 }
 
 function signAccess(payload) {
-  return jwt.sign(payload, process.env.JWT_ACCESS_SECRET, { expiresIn: `${ACCESS_TTL_MIN}m` });
+  return jwt.sign(payload, process.env.JWT_ACCESS_SECRET, {
+    expiresIn: `${ACCESS_TTL_MIN}m`,
+  });
 }
 
 function signRefresh(userId) {
-  return jwt.sign({ sub: userId }, process.env.JWT_REFRESH_SECRET, { expiresIn: `${REFRESH_TTL_DAYS}d` });
+  return jwt.sign({ sub: userId }, process.env.JWT_REFRESH_SECRET, {
+    expiresIn: `${REFRESH_TTL_DAYS}d`,
+  });
 }
 
 function setRefreshCookie(res, token) {
-  res.cookie('refresh_token', token, {
+  res.cookie("refresh_token", token, {
     httpOnly: true,
     secure: true,
-    sameSite: 'none',
-    path: '/auth/refresh',
+    sameSite: "none",
+    path: "/auth/refresh",
     maxAge: REFRESH_TTL_DAYS * 24 * 3600 * 1000,
   });
 }
@@ -84,7 +89,7 @@ async function sendVerificationEmail(email, code) {
   const mailOptions = {
     from: process.env.SMTP_FROM || '"Villanet" <noreply@villanet.com>',
     to: email,
-    subject: 'Your Villanet verification code',
+    subject: "Your Villanet verification code",
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h2 style="color: #000;">Welcome to Villanet</h2>
@@ -105,13 +110,15 @@ async function sendVerificationEmail(email, code) {
 async function cleanupExpiredCodes() {
   try {
     const result = await pool.query(
-      `DELETE FROM verification_codes WHERE expires_at < CURRENT_TIMESTAMP - interval '1 hour'`
+      `DELETE FROM verification_codes WHERE expires_at < CURRENT_TIMESTAMP - interval '1 hour'`,
     );
     if (result.rowCount > 0) {
-      console.log(`🧹 Cleaned up ${result.rowCount} expired verification codes`);
+      console.log(
+        `🧹 Cleaned up ${result.rowCount} expired verification codes`,
+      );
     }
   } catch (error) {
-    console.error('Error cleaning up expired codes:', error);
+    console.error("Error cleaning up expired codes:", error);
   }
 }
 
@@ -122,7 +129,7 @@ export const AuthController = {
   // Paso 1: Enviar código de verificación
   async sendCode(req, res) {
     const { email } = req.body || {};
-    if (!email) return res.status(400).json({ message: 'Email required' });
+    if (!email) return res.status(400).json({ message: "Email required" });
 
     const normalizedEmail = String(email).toLowerCase().trim();
 
@@ -131,10 +138,12 @@ export const AuthController = {
     // Esto cubre: doble click, WhatsApp link preview, proxies de carrier con doble request.
     const cached = pendingSendCode.get(normalizedEmail);
     if (cached && Date.now() < cached.windowExpiresAt) {
-      console.log(`⚡ Idempotency hit for ${normalizedEmail} — returning cached response`);
+      console.log(
+        `⚡ Idempotency hit for ${normalizedEmail} — returning cached response`,
+      );
       return res.json({
-        message: 'Verification code sent',
-        userExists: cached.userExists
+        message: "Verification code sent",
+        userExists: cached.userExists,
       });
     }
 
@@ -149,11 +158,16 @@ export const AuthController = {
       // Verificar si el usuario existe
       const { rows: existingUser } = await pool.query(
         `SELECT id FROM users WHERE email = $1`,
-        [normalizedEmail]
+        [normalizedEmail],
       );
 
       const exists = existingUser.length > 0;
-      console.log('🧪 sendCode existingUser count:', existingUser.length, 'for', normalizedEmail);
+      console.log(
+        "🧪 sendCode existingUser count:",
+        existingUser.length,
+        "for",
+        normalizedEmail,
+      );
 
       // Manejar tiempo en Postgres para evitar problemas de zona horaria
       const result = await pool.query(
@@ -168,40 +182,46 @@ export const AuthController = {
            attempts    = 0,
            user_exists = $3            
          RETURNING id`,
-        [normalizedEmail, codeHash, exists]
+        [normalizedEmail, codeHash, exists],
       );
 
       console.log(`💾 Code hash saved to database: ${result.rows[0].id}`);
-      console.log('📤 sendCode response:', { email: normalizedEmail, userExists: exists });
+      console.log("📤 sendCode response:", {
+        email: normalizedEmail,
+        userExists: exists,
+      });
 
       await sendVerificationEmail(normalizedEmail, code);
 
       // 🔒 Guardar en idempotency map por 30 segundos
       pendingSendCode.set(normalizedEmail, {
         userExists: exists,
-        windowExpiresAt: Date.now() + IDEMPOTENCY_WINDOW_MS
+        windowExpiresAt: Date.now() + IDEMPOTENCY_WINDOW_MS,
       });
       // Auto-limpiar para no acumular memoria
-      setTimeout(() => pendingSendCode.delete(normalizedEmail), IDEMPOTENCY_WINDOW_MS);
+      setTimeout(
+        () => pendingSendCode.delete(normalizedEmail),
+        IDEMPOTENCY_WINDOW_MS,
+      );
 
       // Notificación Discord (non-blocking)
-      notifySafely(() => 
+      notifySafely(() =>
         sendAccessNotification({
           email: normalizedEmail,
           userExists: exists,
-          timestamp: new Date()
-        })
+          timestamp: new Date(),
+        }),
       );
 
       console.log(`✅ Code sent successfully to ${normalizedEmail}`);
 
-      res.json({ 
-        message: 'Verification code sent',
-        userExists: exists
+      res.json({
+        message: "Verification code sent",
+        userExists: exists,
       });
     } catch (err) {
-      console.error('❌ Error sending code:', err);
-      res.status(500).json({ message: 'Failed to send verification code' });
+      console.error("❌ Error sending code:", err);
+      res.status(500).json({ message: "Failed to send verification code" });
     }
   },
 
@@ -209,11 +229,11 @@ export const AuthController = {
   async verifyCode(req, res) {
     const { email, code, full_name } = req.body || {};
     if (!email || !code) {
-      return res.status(400).json({ message: 'Email and code required' });
+      return res.status(400).json({ message: "Email and code required" });
     }
 
     const normalizedEmail = String(email).toLowerCase().trim();
-    
+
     console.log(`🔍 Verifying code for: ${normalizedEmail}`);
     console.log(`📨 Code received from frontend: ${code}`);
 
@@ -227,30 +247,32 @@ export const AuthController = {
          WHERE email = $1 AND used = false
          ORDER BY created_at DESC 
          LIMIT 1`,
-        [normalizedEmail]
+        [normalizedEmail],
       );
 
       console.log(`📊 Found ${codeRows.length} codes for email`);
 
       if (!codeRows.length) {
-        console.log('❌ No code found for email');
-        return res.status(401).json({ message: 'Invalid or expired code' });
+        console.log("❌ No code found for email");
+        return res.status(401).json({ message: "Invalid or expired code" });
       }
 
       const verificationData = codeRows[0];
-      
+
       // Debug de tiempos
       console.log(`⏰ Time debug:`, {
         currentTime: new Date(),
         dbCurrentTime: verificationData.current_db_time,
         expiresAt: verificationData.expires_at,
         isActive: verificationData.is_active,
-        timeDifference: new Date(verificationData.expires_at) - new Date(verificationData.current_db_time)
+        timeDifference:
+          new Date(verificationData.expires_at) -
+          new Date(verificationData.current_db_time),
       });
 
       if (!verificationData.is_active) {
-        console.log('❌ Code expired');
-        return res.status(401).json({ message: 'Invalid or expired code' });
+        console.log("❌ Code expired");
+        return res.status(401).json({ message: "Invalid or expired code" });
       }
 
       console.log(`📝 Verification data:`, {
@@ -258,139 +280,170 @@ export const AuthController = {
         attempts: verificationData.attempts,
         expiresAt: verificationData.expires_at,
         userExists: verificationData.user_exists,
-        codeHash: verificationData.code_hash ? '***' : 'MISSING'
+        codeHash: verificationData.code_hash ? "***" : "MISSING",
       });
 
       if (!verificationData.code_hash) {
-        console.error('❌ CRITICAL: code_hash is null or empty in database');
-        return res.status(500).json({ message: 'System error. Please request a new code.' });
+        console.error("❌ CRITICAL: code_hash is null or empty in database");
+        return res
+          .status(500)
+          .json({ message: "System error. Please request a new code." });
       }
 
       if (verificationData.attempts >= 5) {
-        console.log('🚫 Too many attempts - blocked');
-        return res.status(429).json({ message: 'Too many attempts. Please request a new code.' });
+        console.log("🚫 Too many attempts - blocked");
+        return res
+          .status(429)
+          .json({ message: "Too many attempts. Please request a new code." });
       }
 
       console.log(`🔐 Starting code verification...`);
       const isValidCode = verifyHashedCode(code, verificationData.code_hash);
-      
+
       console.log(`✅ Code validation result: ${isValidCode}`);
-      
+
       if (!isValidCode) {
         await pool.query(
           `UPDATE verification_codes SET attempts = attempts + 1 WHERE id = $1`,
-          [verificationData.id]
+          [verificationData.id],
         );
 
         const remainingAttempts = 5 - (verificationData.attempts + 1);
         console.log(`❌ Invalid code. ${remainingAttempts} attempts remaining`);
-        
-        return res.status(401).json({ 
-          message: `Invalid code. ${remainingAttempts} attempts remaining.` 
+
+        return res.status(401).json({
+          message: `Invalid code. ${remainingAttempts} attempts remaining.`,
         });
       }
 
-      console.log(`✅ Code valid, user exists: ${verificationData.user_exists}`);
+      console.log(
+        `✅ Code valid, user exists: ${verificationData.user_exists}`,
+      );
 
       await pool.query(
         `UPDATE verification_codes SET used = true, attempts = 0 WHERE id = $1`,
-        [verificationData.id]
+        [verificationData.id],
       );
 
       let user;
-      
+
       if (verificationData.user_exists) {
         const { rows: userRows } = await pool.query(
           `SELECT * FROM users WHERE email = $1`,
-          [normalizedEmail]
+          [normalizedEmail],
         );
         user = userRows[0];
         console.log(`👤 Existing user found: ${user.id}`);
 
-        if (user.status === Status.PENDING && user.trial_expires_at && new Date(user.trial_expires_at) < new Date()) {
-          console.log('⏰ Trial period expired');
-          return res.status(403).json({ message: 'Trial expired. Await admin approval.' });
+        if (
+          user.status === Status.PENDING &&
+          user.trial_expires_at &&
+          new Date(user.trial_expires_at) < new Date()
+        ) {
+          console.log("⏰ Trial period expired");
+          return res
+            .status(403)
+            .json({ message: "Trial expired. Await admin approval." });
         }
       } else {
         if (!full_name) {
-          return res.status(400).json({ message: 'Full name required for new users' });
+          return res
+            .status(400)
+            .json({ message: "Full name required for new users" });
         }
 
         console.log(`👤 Creating new user with full_name: ${full_name}`);
-        
+
         const { rows: newUserRows } = await pool.query(
           `INSERT INTO users (email, full_name, role, status, trial_expires_at, password_hash)
            VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP + interval '24 hours', $5)
            RETURNING *`,
-          [normalizedEmail, full_name, Roles.TA, Status.PENDING, '']
+          [normalizedEmail, full_name, Roles.TA, Status.PENDING, ""],
         );
         user = newUserRows[0];
         console.log(`✅ New user created: ${user.id}`);
       }
 
-      const accessToken = signAccess({ sub: user.id, role: user.role, status: user.status, email: user.email  });
+      const accessToken = signAccess({
+        sub: user.id,
+        role: user.role,
+        status: user.status,
+        email: user.email,
+      });
       const refreshToken = signRefresh(user.id);
-      
+
       await pool.query(
         `INSERT INTO refresh_tokens (user_id, token, expires_at) 
          VALUES ($1, $2, CURRENT_TIMESTAMP + interval '${REFRESH_TTL_DAYS} days')`,
-        [user.id, refreshToken]
+        [user.id, refreshToken],
       );
-      
+
       setRefreshCookie(res, refreshToken);
 
       const ip = req.ip;
-      const ua = req.headers['user-agent'];
+      const ua = req.headers["user-agent"];
       await pool.query(
         `INSERT INTO login_audit(user_id, email, success, ip, user_agent) 
          VALUES ($1, $2, true, $3, $4)`,
-        [user.id, normalizedEmail, ip, ua]
+        [user.id, normalizedEmail, ip, ua],
       );
 
       console.log(`🎉 Login successful for user: ${user.id}`);
 
       res.json({
         accessToken,
-        user: { 
-          id: user.id, 
-          email: user.email, 
-          role: user.role, 
-          status: user.status, 
+        user: {
+          id: user.id,
+          email: user.email,
+          role: user.role,
+          status: user.status,
           trial_expires_at: user.trial_expires_at,
           full_name: user.full_name,
-          avatar_url: user.avatar_url ?? null
-        }
+          avatar_url: user.avatar_url ?? null,
+        },
       });
     } catch (err) {
-      console.error('❌ Error verifying code:', err);
-      res.status(500).json({ message: 'Verification failed' });
+      console.error("❌ Error verifying code:", err);
+      res.status(500).json({ message: "Verification failed" });
     }
   },
 
-  // ... resto de los métodos sin cambios
   async register(req, res) {
     const { email, password, full_name, role } = req.body || {};
-    if (!email || !password) return res.status(400).json({ message: 'email and password required' });
+    if (!email || !password)
+      return res.status(400).json({ message: "email and password required" });
 
     const hash = await bcrypt.hash(String(password), 10);
-    const newRole = (role && ['admin','ta','pmc'].includes(role)) ? role : Roles.TA;
+    const newRole =
+      role && ["admin", "ta", "pmc"].includes(role) ? role : Roles.TA;
 
     const { rows } = await pool.query(
       `INSERT INTO users (email, password_hash, full_name, role, status, trial_expires_at)
        VALUES ($1,$2,$3,$4,$5, CURRENT_TIMESTAMP + interval '24 hours')
        ON CONFLICT (email) DO NOTHING
        RETURNING id, email, role, status, trial_expires_at, full_name`,
-      [String(email).toLowerCase(), hash, full_name || null, newRole, Status.PENDING]
+      [
+        String(email).toLowerCase(),
+        hash,
+        full_name || null,
+        newRole,
+        Status.PENDING,
+      ],
     );
-    
-    if (!rows.length) return res.status(409).json({ message: 'Email already exists' });
+
+    if (!rows.length)
+      return res.status(409).json({ message: "Email already exists" });
 
     const u = rows[0];
-    const accessToken = signAccess({ sub: u.id, role: u.role, status: Status.PENDING });
+    const accessToken = signAccess({
+      sub: u.id,
+      role: u.role,
+      status: Status.PENDING,
+    });
     const refreshToken = signRefresh(u.id);
     await pool.query(
       `INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1,$2, CURRENT_TIMESTAMP + interval '${REFRESH_TTL_DAYS} days')`,
-      [u.id, refreshToken]
+      [u.id, refreshToken],
     );
     setRefreshCookie(res, refreshToken);
     res.status(201).json({ accessToken, user: u });
@@ -399,72 +452,111 @@ export const AuthController = {
   async login(req, res) {
     const { email, password } = req.body || {};
     const ip = req.ip;
-    const ua = req.headers['user-agent'];
+    const ua = req.headers["user-agent"];
 
-    const { rows } = await pool.query(`SELECT * FROM users WHERE email=$1`, [String(email).toLowerCase()]);
+    const { rows } = await pool.query(`SELECT * FROM users WHERE email=$1`, [
+      String(email).toLowerCase(),
+    ]);
     if (!rows.length) {
-      await pool.query(`INSERT INTO login_audit(email, success, ip, user_agent) VALUES ($1,false,$2,$3)`, [email, ip, ua]);
-      return res.status(401).json({ message: 'Invalid credentials' });
+      await pool.query(
+        `INSERT INTO login_audit(email, success, ip, user_agent) VALUES ($1,false,$2,$3)`,
+        [email, ip, ua],
+      );
+      return res.status(401).json({ message: "Invalid credentials" });
     }
     const user = rows[0];
-    
+
     if (!user.password_hash) {
-      return res.status(401).json({ message: 'Please use email verification' });
+      return res.status(401).json({ message: "Please use email verification" });
     }
-    
+
     const ok = await bcrypt.compare(String(password), user.password_hash);
 
-    await pool.query(`INSERT INTO login_audit(user_id,email,success,ip,user_agent) VALUES ($1,$2,$3,$4,$5)`,
-      [user.id, email, ok, ip, ua]);
+    await pool.query(
+      `INSERT INTO login_audit(user_id,email,success,ip,user_agent) VALUES ($1,$2,$3,$4,$5)`,
+      [user.id, email, ok, ip, ua],
+    );
 
-    if (!ok) return res.status(401).json({ message: 'Invalid credentials' });
+    if (!ok) return res.status(401).json({ message: "Invalid credentials" });
 
-    if (user.status === Status.PENDING && user.trial_expires_at && new Date(user.trial_expires_at) < new Date()) {
-      return res.status(403).json({ message: 'Trial expired. Await admin approval.' });
+    if (
+      user.status === Status.PENDING &&
+      user.trial_expires_at &&
+      new Date(user.trial_expires_at) < new Date()
+    ) {
+      return res
+        .status(403)
+        .json({ message: "Trial expired. Await admin approval." });
     }
 
-    const accessToken = signAccess({ sub: user.id, role: user.role, status: user.status, email: user.email  });
+    const accessToken = signAccess({
+      sub: user.id,
+      role: user.role,
+      status: user.status,
+      email: user.email,
+    });
     const refreshToken = signRefresh(user.id);
     await pool.query(
       `INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1,$2, CURRENT_TIMESTAMP + interval '${REFRESH_TTL_DAYS} days')`,
-      [user.id, refreshToken]
+      [user.id, refreshToken],
     );
     setRefreshCookie(res, refreshToken);
 
     res.json({
       accessToken,
-      user: { id: user.id, email: user.email, role: user.role, status: user.status, trial_expires_at: user.trial_expires_at, full_name: user.full_name, avatar_url: user.avatar_url ?? null }
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        trial_expires_at: user.trial_expires_at,
+        full_name: user.full_name,
+        avatar_url: user.avatar_url ?? null,
+      },
     });
   },
 
   async refresh(req, res) {
     const token = req.cookies?.refresh_token;
-    if (!token) return res.status(401).json({ message: 'No refresh' });
+    if (!token) return res.status(401).json({ message: "No refresh" });
 
-    const { rows } = await pool.query(`
+    const { rows } = await pool.query(
+      `
       SELECT r.*, u.role, u.status FROM refresh_tokens r
       JOIN users u ON u.id=r.user_id
-      WHERE r.token=$1 AND r.revoked=false AND r.expires_at>CURRENT_TIMESTAMP`, [token]);
+      WHERE r.token=$1 AND r.revoked=false AND r.expires_at>CURRENT_TIMESTAMP`,
+      [token],
+    );
 
-    if (!rows.length) return res.status(401).json({ message: 'Refresh invalid' });
+    if (!rows.length)
+      return res.status(401).json({ message: "Refresh invalid" });
 
     try {
       jwt.verify(token, process.env.JWT_REFRESH_SECRET);
-      const accessToken = signAccess({ sub: rows[0].user_id, role: rows[0].role, status: rows[0].status, email: rows[0].email });
+      const accessToken = signAccess({
+        sub: rows[0].user_id,
+        role: rows[0].role,
+        status: rows[0].status,
+        email: rows[0].email,
+      });
       return res.json({ accessToken });
     } catch {
-      return res.status(401).json({ message: 'Refresh invalid' });
+      return res.status(401).json({ message: "Refresh invalid" });
     }
   },
 
   async logout(req, res) {
     const token = req.cookies?.refresh_token;
-    if (token) await pool.query(`UPDATE refresh_tokens SET revoked=true WHERE token=$1`, [token]);
-    res.clearCookie('refresh_token', {
+    if (token)
+      await pool.query(
+        `UPDATE refresh_tokens SET revoked=true WHERE token=$1`,
+        [token],
+      );
+    res.clearCookie("refresh_token", {
       httpOnly: true,
       secure: true,
-      sameSite: 'none',
-      path: '/auth/refresh'
+      sameSite: "none",
+      path: "/auth/refresh",
     });
     res.json({ ok: true });
   },
@@ -472,10 +564,33 @@ export const AuthController = {
   async me(req, res) {
     const u = req.user;
     const { rows } = await pool.query(
-      `SELECT id,email,role,status,trial_expires_at,full_name,avatar_url FROM users WHERE id=$1`, [u.sub]
+      `SELECT id,email,role,status,trial_expires_at,full_name,avatar_url FROM users WHERE id=$1`,
+      [u.sub],
     );
-    if (!rows.length) return res.status(404).json({ message: 'Not found' });
+    if (!rows.length) return res.status(404).json({ message: "Not found" });
     res.json(rows[0]);
+  },
+
+  // ── CHECK EMAIL (sin efectos secundarios) ─────────────────────────────────
+  // POST /auth/check-email
+  // Público. Solo verifica si el email existe en la DB.
+  // No genera códigos, no envía emails.
+  async checkEmail(req, res) {
+    const { email } = req.body || {};
+    if (!email) return res.status(400).json({ message: "Email required" });
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    try {
+      const { rows } = await pool.query(
+        `SELECT id FROM users WHERE email = $1`,
+        [normalizedEmail],
+      );
+      res.json({ userExists: rows.length > 0 });
+    } catch (err) {
+      console.error("❌ check-email error:", err);
+      res.status(500).json({ message: "Internal server error" });
+    }
   },
 
   // ── FORGOT PASSWORD ────────────────────────────────────────────────────────
@@ -485,7 +600,7 @@ export const AuthController = {
   // Siempre responde 200 para no revelar si el email existe o no (seguridad).
   async forgotPassword(req, res) {
     const { email } = req.body || {};
-    if (!email) return res.status(400).json({ message: 'Email required' });
+    if (!email) return res.status(400).json({ message: "Email required" });
 
     const normalizedEmail = String(email).toLowerCase().trim();
 
@@ -493,13 +608,15 @@ export const AuthController = {
       // Verificar si el usuario existe — pero NO revelarlo en la respuesta
       const { rows: userRows } = await pool.query(
         `SELECT id FROM users WHERE email = $1`,
-        [normalizedEmail]
+        [normalizedEmail],
       );
 
       // Si el email no existe, responder igual para no filtrar información
       if (!userRows.length) {
-        console.log(`🔒 forgot-password: email not found (${normalizedEmail}), silent response`);
-        return res.json({ message: 'If that email exists, a code was sent.' });
+        console.log(
+          `🔒 forgot-password: email not found (${normalizedEmail}), silent response`,
+        );
+        return res.json({ message: "If that email exists, a code was sent." });
       }
 
       const userId = userRows[0].id;
@@ -518,14 +635,14 @@ export const AuthController = {
                expires_at = EXCLUDED.expires_at,
                reset_token = NULL,
                used_at     = NULL`,
-        [userId, codeHash]
+        [userId, codeHash],
       );
 
       // Reusar el transporter existente con template consistente con el resto
       const mailOptions = {
         from: process.env.SMTP_FROM || '"Villanet" <noreply@villanet.com>',
         to: normalizedEmail,
-        subject: 'Reset your Villanet password',
+        subject: "Reset your Villanet password",
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
             <h2 style="color: #000;">Reset your password</h2>
@@ -542,10 +659,10 @@ export const AuthController = {
       await transporter.sendMail(mailOptions);
       console.log(`✅ forgot-password code sent to ${normalizedEmail}`);
 
-      res.json({ message: 'If that email exists, a code was sent.' });
+      res.json({ message: "If that email exists, a code was sent." });
     } catch (err) {
-      console.error('❌ forgot-password error:', err);
-      res.status(500).json({ message: 'Failed to send reset code' });
+      console.error("❌ forgot-password error:", err);
+      res.status(500).json({ message: "Failed to send reset code" });
     }
   },
 
@@ -555,7 +672,8 @@ export const AuthController = {
   // resetToken UUID de un solo uso (5 min de vida) para el paso siguiente.
   async verifyResetCode(req, res) {
     const { email, code } = req.body || {};
-    if (!email || !code) return res.status(400).json({ message: 'Email and code required' });
+    if (!email || !code)
+      return res.status(400).json({ message: "Email and code required" });
 
     const normalizedEmail = String(email).toLowerCase().trim();
 
@@ -565,25 +683,33 @@ export const AuthController = {
          FROM password_reset_codes prc
          JOIN users u ON u.id = prc.user_id
          WHERE u.email = $1`,
-        [normalizedEmail]
+        [normalizedEmail],
       );
 
       if (!rows.length) {
-        return res.status(400).json({ message: 'No reset code found for this email' });
+        return res
+          .status(400)
+          .json({ message: "No reset code found for this email" });
       }
 
       const record = rows[0];
 
       if (record.used_at) {
-        return res.status(400).json({ message: 'This code has already been used' });
+        return res
+          .status(400)
+          .json({ message: "This code has already been used" });
       }
 
       if (new Date(record.expires_at) < new Date()) {
-        return res.status(400).json({ message: 'Code expired. Please request a new one.' });
+        return res
+          .status(400)
+          .json({ message: "Code expired. Please request a new one." });
       }
 
       if (record.attempts >= 5) {
-        return res.status(429).json({ message: 'Too many attempts. Please request a new code.' });
+        return res
+          .status(429)
+          .json({ message: "Too many attempts. Please request a new code." });
       }
 
       const isValid = verifyHashedCode(String(code), record.code_hash);
@@ -591,28 +717,32 @@ export const AuthController = {
       if (!isValid) {
         await pool.query(
           `UPDATE password_reset_codes SET attempts = attempts + 1 WHERE id = $1`,
-          [record.id]
+          [record.id],
         );
         const remaining = 5 - (record.attempts + 1);
-        return res.status(400).json({ message: `Invalid code. ${remaining} attempts remaining.` });
+        return res
+          .status(400)
+          .json({ message: `Invalid code. ${remaining} attempts remaining.` });
       }
 
       // Código válido: generar resetToken UUID de un solo uso (5 min)
-      const resetToken = crypto.randomBytes(32).toString('hex');
+      const resetToken = crypto.randomBytes(32).toString("hex");
       await pool.query(
         `UPDATE password_reset_codes
          SET reset_token = $1,
              expires_at  = CURRENT_TIMESTAMP + interval '5 minutes',
              attempts    = 0
          WHERE id = $2`,
-        [resetToken, record.id]
+        [resetToken, record.id],
       );
 
-      console.log(`✅ verify-reset-code OK for ${normalizedEmail}, resetToken issued`);
+      console.log(
+        `✅ verify-reset-code OK for ${normalizedEmail}, resetToken issued`,
+      );
       res.json({ resetToken });
     } catch (err) {
-      console.error('❌ verify-reset-code error:', err);
-      res.status(500).json({ message: 'Verification failed' });
+      console.error("❌ verify-reset-code error:", err);
+      res.status(500).json({ message: "Verification failed" });
     }
   },
 
@@ -623,10 +753,14 @@ export const AuthController = {
   async resetPassword(req, res) {
     const { resetToken, newPassword } = req.body || {};
     if (!resetToken || !newPassword) {
-      return res.status(400).json({ message: 'resetToken and newPassword required' });
+      return res
+        .status(400)
+        .json({ message: "resetToken and newPassword required" });
     }
     if (String(newPassword).length < 8) {
-      return res.status(400).json({ message: 'Password must be at least 8 characters' });
+      return res
+        .status(400)
+        .json({ message: "Password must be at least 8 characters" });
     }
 
     try {
@@ -636,21 +770,25 @@ export const AuthController = {
          FROM password_reset_codes prc
          JOIN users u ON u.id = prc.user_id
          WHERE prc.reset_token = $1`,
-        [resetToken]
+        [resetToken],
       );
 
       if (!rows.length) {
-        return res.status(400).json({ message: 'Invalid or expired token' });
+        return res.status(400).json({ message: "Invalid or expired token" });
       }
 
       const record = rows[0];
 
       if (record.used_at) {
-        return res.status(400).json({ message: 'This token has already been used' });
+        return res
+          .status(400)
+          .json({ message: "This token has already been used" });
       }
 
       if (new Date(record.expires_at) < new Date()) {
-        return res.status(400).json({ message: 'Token expired. Please start over.' });
+        return res
+          .status(400)
+          .json({ message: "Token expired. Please start over." });
       }
 
       // Hashear la nueva contraseña e invalidar el token en la misma transacción
@@ -658,28 +796,28 @@ export const AuthController = {
 
       const client = await pool.connect();
       try {
-        await client.query('BEGIN');
+        await client.query("BEGIN");
         await client.query(
           `UPDATE users SET password_hash = $1 WHERE id = $2`,
-          [newHash, record.user_id]
+          [newHash, record.user_id],
         );
         await client.query(
           `UPDATE password_reset_codes SET used_at = CURRENT_TIMESTAMP, reset_token = NULL WHERE id = $1`,
-          [record.id]
+          [record.id],
         );
-        await client.query('COMMIT');
+        await client.query("COMMIT");
       } catch (err) {
-        await client.query('ROLLBACK');
+        await client.query("ROLLBACK");
         throw err;
       } finally {
         client.release();
       }
 
       console.log(`✅ reset-password OK for user ${record.user_id}`);
-      res.json({ message: 'Password updated successfully' });
+      res.json({ message: "Password updated successfully" });
     } catch (err) {
-      console.error('❌ reset-password error:', err);
-      res.status(500).json({ message: 'Failed to reset password' });
+      console.error("❌ reset-password error:", err);
+      res.status(500).json({ message: "Failed to reset password" });
     }
   },
 };
