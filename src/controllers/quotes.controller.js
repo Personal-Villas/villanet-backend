@@ -474,6 +474,27 @@ export async function sendQuoteEmail(req, res) {
       }
     }
 
+    // ── Icon attachments (embedded CID — no external URLs needed) ───────────
+    const ICONS_DIR = "./src/assets/icons";
+    const iconAttachments = [
+      { filename: "map-pin.png",             path: `${ICONS_DIR}/map-pin.png`,             cid: "map-pin@villanet"             },
+      { filename: "bed-double.png",          path: `${ICONS_DIR}/bed-double.png`,          cid: "bed-double@villanet"          },
+      { filename: "bath.png",                path: `${ICONS_DIR}/bath.png`,                cid: "bath@villanet"                },
+      { filename: "calendar-arrow-up.png",   path: `${ICONS_DIR}/calendar-arrow-up.png`,   cid: "calendar-arrow-up@villanet"   },
+      { filename: "calendar-arrow-down.png", path: `${ICONS_DIR}/calendar-arrow-down.png`, cid: "calendar-arrow-down@villanet" },
+      { filename: "cloud-moon.png",          path: `${ICONS_DIR}/cloud-moon.png`,          cid: "cloud-moon@villanet"          },
+      { filename: "users.png",               path: `${ICONS_DIR}/users.png`,               cid: "users@villanet"               },
+      { filename: "square-check-big.png",    path: `${ICONS_DIR}/square-check-big.png`,    cid: "square-check-big@villanet"    },
+      { filename: "plane.png",               path: `${ICONS_DIR}/plane.png`,               cid: "plane@villanet"               },
+      { filename: "car.png",                 path: `${ICONS_DIR}/car.png`,                 cid: "car@villanet"                 },
+      { filename: "shopping-cart.png",       path: `${ICONS_DIR}/shopping-cart.png`,       cid: "shopping-cart@villanet"       },
+      { filename: "chef-hat.png",            path: `${ICONS_DIR}/chef-hat.png`,            cid: "chef-hat@villanet"            },
+      { filename: "sparkles.png",            path: `${ICONS_DIR}/sparkles.png`,            cid: "sparkles@villanet"            },
+      { filename: "dumbbell.png",            path: `${ICONS_DIR}/dumbbell.png`,            cid: "dumbbell@villanet"            },
+      { filename: "baby.png",                path: `${ICONS_DIR}/baby.png`,                cid: "baby@villanet"                },
+      { filename: "party-popper.png",        path: `${ICONS_DIR}/party-popper.png`,        cid: "party-popper@villanet"        },
+    ];
+
     // ── Envío de emails con manejo de error PARCIAL ──────────────────────────
     const advisorHtml = await generateQuoteEmailHtml(
       { ...quote, recipient_type: "advisor" },
@@ -490,6 +511,7 @@ export async function sendQuoteEmail(req, res) {
         to: quote.travel_advisor_email,
         subject: `Your Quote for ${quote.guest_first_name} ${quote.guest_last_name}`,
         html: advisorHtml,
+        attachments: iconAttachments,
       });
       advisorEmailSent = true;
     } catch (err) {
@@ -508,6 +530,7 @@ export async function sendQuoteEmail(req, res) {
           to: quote.guest_email,
           subject: `Your Curated Villa Options — ${quote.guest_first_name} ${quote.guest_last_name}`,
           html: guestHtml,
+          attachments: iconAttachments,
         });
         guestEmailSent = true;
       } catch (err) {
@@ -650,15 +673,11 @@ export async function generateQuoteEmailHtml(
     ? `Here are your curated villa options, handpicked based on your preferences.`
     : `Here is the quote prepared for your client, <strong style="font-weight:600;">${quote.guest_first_name} ${quote.guest_last_name}</strong>.`;
 
-  // PNG icons — email-safe (no SVG)
-  const iconPin   = `<img src="https://img.icons8.com/?size=100&id=3723&format=png&color=71717a"   width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
-  const iconBed   = `<img src="https://img.icons8.com/?size=100&id=7546&format=png&color=71717a"   width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
-  const iconBath  = `<img src="https://img.icons8.com/?size=100&id=11485&format=png&color=71717a"  width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
-  const iconCal   = `<img src="https://img.icons8.com/?size=100&id=23&format=png&color=71717a"     width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
-  const iconNight = `<img src="https://img.icons8.com/?size=100&id=660&format=png&color=71717a"    width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
-  const iconGuest = `<img src="https://img.icons8.com/?size=100&id=fEZo4zNy3Mqa&format=png&color=71717a" width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
-  const iconCheck =`<img src="https://img.icons8.com/?size=100&id=25534&format=png&color=000000"width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
-  const iconStars =`<img src="https://img.icons8.com/?size=100&id=0O4DSMrBu10j&format=png&color=000000"width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
+  // PNG icons — embedded as CID attachments (email-safe, no external URLs)
+  // Helper: renders a small inline CID icon (13px, used in cards/trip bar)
+  const icon13 = (cid) => `<img src="cid:${cid}@villanet" width="13" height="13" style="vertical-align:middle;margin-right:5px;display:inline;" alt="">`;
+  // Helper: renders a larger inline CID icon (14px, used in services section)
+  const icon14 = (cid) => `<img src="cid:${cid}@villanet" width="14" height="14" style="vertical-align:middle;margin-right:6px;display:inline;" alt="">`;
 
   // ── Header branding: TA logo > TA name > VillaNet logo (fallback) ──────────
   let headerBrandHtml;
@@ -679,7 +698,7 @@ export async function generateQuoteEmailHtml(
   const S = {
     body:        "margin:0;padding:0;background-color:#f4f4f5;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#09090b;",
     outerTable:  "border-collapse:collapse;width:100%;background-color:#f4f4f5;",
-    wrap:        "width:600px;max-width:600px;",
+    wrap:        "width:660px;max-width:660px;",
 
     // Header
     hdCell:      "background-color:#ffffff;padding:36px 40px 28px;text-align:center;border-bottom:1px solid #e5e7eb;",
@@ -689,10 +708,10 @@ export async function generateQuoteEmailHtml(
 
     // Trip bar
     tripCell:    "background-color:#ffffff;padding:20px 40px;border-bottom:1px solid #e5e7eb;",
-    tcLabel:     "font-size:11px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:#71717a;margin:0 0 3px 0;",
+    tcLabel:     "font-size:11px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:#71717a;margin:0 0 6px 0;line-height:1.4;",
     tcVal:       "font-weight:600;color:#09090b;font-size:13px;margin:0;",
-    tripTd:      "width:25%;padding:10px 12px;vertical-align:middle;",
-    tripTdBorder:"width:25%;padding:10px 12px;vertical-align:middle;border-left:1px solid #e5e7eb;",
+    tripTd:      "width:25%;padding:10px 12px;vertical-align:top;",
+    tripTdBorder:"width:25%;padding:10px 12px;vertical-align:top;border-left:1px solid #e5e7eb;",
 
     // Content wrapper
     contentCell: "padding:24px 40px 32px;background-color:#f4f4f5;",
@@ -715,8 +734,8 @@ export async function generateQuoteEmailHtml(
     bdTotalVal:  "font-size:16px;font-weight:700;color:#09090b;text-align:right;padding:10px 0 16px 0;vertical-align:middle;border-top:2px solid #e5e7eb;",
 
     // CTA Button
-btnTd:       "padding:0;text-align:center;background-color:#09090b;border-radius:8px;",
-btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;font-weight:600;letter-spacing:0.02em;padding:13px 28px;text-align:center;font-family:Arial,Helvetica,sans-serif;",
+    btnTd:       "padding:0;text-align:center;background-color:#09090b;border-radius:8px;",
+    btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;font-weight:600;letter-spacing:0.02em;padding:13px 28px;text-align:center;font-family:Arial,Helvetica,sans-serif;",
 
     // Footer
     ftCell:      "background-color:#fafafa;padding:28px 40px;text-align:center;border-top:1px solid #e5e7eb;",
@@ -725,15 +744,15 @@ btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;fo
 
   // ── Trip bar cells ────────────────────────────────────────────────────────
   const tripCells = [
-    { icon: iconCal,   label: "Check-in",  val: formatDate(checkInYmd) },
-    { icon: iconCal,   label: "Check-out", val: formatDate(checkOutYmd) },
-    { icon: iconNight, label: "Nights",    val: safeNights },
-    ...(quote.guests ? [{ icon: iconGuest, label: "Guests", val: quote.guests }] : []),
+    { icon: icon13("calendar-arrow-up"),   label: "Check-in",  val: formatDate(checkInYmd) },
+    { icon: icon13("calendar-arrow-down"), label: "Check-out", val: formatDate(checkOutYmd) },
+    { icon: icon13("cloud-moon"),          label: "Nights",    val: safeNights },
+    ...(quote.guests ? [{ icon: icon13("users"), label: "Guests", val: quote.guests }] : []),
   ];
 
   const tripCellsHtml = tripCells
     .map((c, i) => `
-      <td style="${i === 0 ? S.tripTd : S.tripTdBorder}">
+      <td class="trip-td" valign="top" style="${i === 0 ? S.tripTd : S.tripTdBorder}">
         <p style="${S.tcLabel}">${c.icon} ${c.label}</p>
         <p style="${S.tcVal}">${c.val}</p>
       </td>`)
@@ -742,7 +761,7 @@ btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;fo
   // ── Villa services helpers ────────────────────────────────────────────────
 
   /**
-   * Builds the "What's Included" + "Enhance Your Stay" block for a villa card.
+   * Builds the "What's Included" block for a villa card.
    * Reads the villanet_* boolean columns from the listings row (already joined).
    */
   function buildServicesBlock(item) {
@@ -759,68 +778,34 @@ btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;fo
       { key: "villanet_golf_cart_included",     label: "Golf Cart",},
     ];
 
-    // Extras copy — placeholder text until Robbie/Jhony provides the final copy
-    const EXTRAS_COPY = {
-      villanet_chef_included:         "Elevate your stay with a Private Chef — available upon request to craft personalized menus for every occasion.",
-      villanet_cook_included:         "A professional Cook can be arranged for your stay to prepare daily meals. Ask your travel advisor for details.",
-      villanet_waiter_butler_included:"A dedicated Butler/Waiter service is available to ensure seamless hospitality throughout your stay.",
-      villanet_private_gym:           "A fully equipped Private Gym can be set up on request, tailored to your fitness routine.",
-      villanet_private_cinema:        "Enjoy a Private Cinema experience at this property — available upon request for movie nights and events.",
-      villanet_pickleball:            "Pickleball equipment and court setup are available upon request for guests who love an active stay.",
-      villanet_tennis:                "Professional tennis equipment and court access can be arranged — inquire with your travel advisor.",
-      villanet_golf_cart_included:    "A Golf Cart can be arranged for easy on-property and neighborhood transport. Ask your advisor for rates.",
-    };
-
     const included = [];
-    const extras   = [];
 
     for (const svc of SERVICES) {
       // Special case: golf cart — show as included only when villanet_golf_villa is also true
       if (svc.key === "villanet_golf_cart_included") {
         if (item[svc.key] === true || item.villanet_golf_villa === true) {
           included.push(svc);
-        } else {
-          extras.push(svc);
         }
         continue;
       }
       if (item[svc.key] === true) {
         included.push(svc);
-      } else {
-        // Only surface as an extra if the column exists on the row (not NULL = no data)
-        if (item[svc.key] === false) {
-          extras.push(svc);
-        }
       }
     }
 
-    // If no data at all, skip the whole block
-    if (included.length === 0 && extras.length === 0) return "";
+    // If nothing included, skip the whole block
+    if (included.length === 0) return "";
 
     const badgeStyle  = "display: inline-block;background-color: #ffffff;color: #111827;border: 1px solid #e5e7eb;border-radius: 20px;padding: 4px 12px;font-size: 11px;font-weight: 600;margin: 3px 4px 3px 0;white-space: nowrap;letter-spacing: 0.025em;";
     const sectionHead = "font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#71717a;margin:0 0 8px 0;";
-    const divider     = `<div style="height:1px;background-color:#f0f0f0;margin:14px 0;"></div>`;
 
     let html = `<div style="margin:14px 0 18px 0;">`;
-
-    if (included.length > 0) {
-      html += `<p style="${sectionHead}">${iconCheck} What's Included</p>`;
-      html += `<div>`;
-      for (const svc of included) {
-        html += `<span style="${badgeStyle}">${svc.label}</span>`;
-      }
-      html += `</div>`;
+    html += `<p style="${sectionHead}">${icon13("square-check-big")} What's Included</p>`;
+    html += `<div>`;
+    for (const svc of included) {
+      html += `<span style="${badgeStyle}">${svc.label}</span>`;
     }
-
-    if (extras.length > 0) {
-      if (included.length > 0) html += divider;
-      html += `<p style="${sectionHead}">${iconStars}Enhance Your Stay</p>`;
-      for (const svc of extras) {
-        const copy = EXTRAS_COPY[svc.key] || `${svc.label} services are available for this property upon request.`;
-        html += `<p style="font-size:12px;color:#52525b;margin:0 0 6px 0;line-height:1.5;"><strong style="color:#09090b;">${svc.label}:</strong> ${copy}</p>`;
-      }
-    }
-
+    html += `</div>`;
     html += `</div>`;
     return html;
   }
@@ -882,8 +867,8 @@ btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;fo
           <p style="${S.cardTitle}">${item.listing_name || "Luxury Villa"}</p>
 
           <!-- Meta -->
-          <p style="${S.cardMetaP}">${iconPin}${item.listing_location || ""}</p>
-          <p style="${S.cardMetaP}">${iconBed}${item.bedrooms} Bedrooms &nbsp;&middot;&nbsp; ${iconBath}${item.bathrooms} Bathrooms</p>
+          <p style="${S.cardMetaP}">${icon13("map-pin")}${item.listing_location || ""}</p>
+          <p style="${S.cardMetaP}">${icon13("bed-double")}${item.bedrooms} Bedrooms &nbsp;&middot;&nbsp; ${icon13("bath")}${item.bathrooms} Bathrooms</p>
 
           <!-- Services: included + extras -->
           ${buildServicesBlock(item)}
@@ -959,7 +944,43 @@ btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;fo
     })
     .join("");
 
-    return `<!DOCTYPE html>
+  // ── Services section ──────────────────────────────────────────────────────
+
+  const EXTRA_SERVICES = [
+    { cid: "plane",         label: "Private Airport Transfers",                     desc: "Seamless arrival &amp; departure planning." },
+    { cid: "car",           label: "Rental Vehicles Delivered to Your Villa",        desc: "Skip the rental counter entirely." },
+    { cid: "shopping-cart", label: "Grocery Pre-Stocking &amp; Customized Menu Planning", desc: "Arrive to a fully prepared kitchen." },
+    { cid: "chef-hat",      label: "Private Chef or Chef-On-Request",                desc: "Local, professional, and destination-savvy chefs." },
+    { cid: "sparkles",      label: "Spa &amp; Massage Treatments In-Villa",          desc: "Therapists come directly to the villa." },
+    { cid: "dumbbell",      label: "Fitness, Yoga, &amp; Personal Training",         desc: "Sessions tailored to your group." },
+    { cid: "baby",          label: "Babysitting &amp; Childcare Services",           desc: "Vetted caretakers experienced with traveling families." },
+    { cid: "party-popper",  label: "Celebration &amp; Event Coordination",           desc: "Support for birthdays, milestones, and special occasions." },
+  ];
+
+  // Group into rows of 2 columns
+  const svcRows = [];
+  for (let i = 0; i < EXTRA_SERVICES.length; i += 2) {
+    svcRows.push(EXTRA_SERVICES.slice(i, i + 2));
+  }
+
+  const svcCardDiv = `border:1px solid #e5e7eb;border-radius:10px;padding:16px 18px;min-height:90px;box-sizing:border-box;`;
+  const svcTitle   = `font-size:12px;font-weight:700;color:#1f2937;margin:0 0 4px 0;font-family:Arial,Helvetica,sans-serif;`;
+  const svcDesc    = `font-size:12px;color:#71717a;margin:0;font-family:Arial,Helvetica,sans-serif;line-height:1.5;`;
+
+  const svcRowsHtml = svcRows.map((pair, rowIdx) => {
+    const isLast = rowIdx === svcRows.length - 1;
+    return `<tr>${pair.map((svc, colIdx) => `
+      <td height="110" class="svc-col" valign="top" width="50%"
+          style="padding:0 ${colIdx === 0 ? `8px ${isLast ? "0" : "12px"} 0` : `0 ${isLast ? "0" : "12px"} 8px`};">
+        <div style="${svcCardDiv}">
+          <p style="${svcTitle}">${icon14(svc.cid)}${svc.label}</p>
+          <p style="${svcDesc}">${svc.desc}</p>
+        </div>
+      </td>`).join("")}
+    </tr>`;
+  }).join("");
+
+  return `<!DOCTYPE html>
     <html lang="en" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
     <head>
       <meta charset="utf-8">
@@ -980,11 +1001,12 @@ btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;fo
         table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
         img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
         /* Responsive — survives forward better than layout styles */
-        @media only screen and (max-width: 620px) {
-          .wrap { width: 100% !important; max-width: 100% !important; }
-          .trip-td { display: block !important; width: 100% !important; border-left: none !important; border-bottom: 1px solid #e5e7eb !important; padding: 8px 0 !important; }
+        @media only screen and (max-width: 700px) {
+          .wrap { width: 100% !important; max-width: 680px !important; }
+          .trip-td { display: block !important; width: 100% !important; border-left: none !important; border-bottom: 1px solid #e5e7eb !important; padding: 12px 16px !important; box-sizing: border-box !important; }
           .card-img { height: 180px !important; }
           .pad { padding-left: 20px !important; padding-right: 20px !important; }
+          .svc-col { display: block !important; width: 100% !important; padding-right: 0 !important; padding-left: 0 !important; padding-bottom: 10px !important; }
         }
       </style>
     </head>
@@ -1036,13 +1058,25 @@ btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;fo
                 ${cardsHtml}
               </td>
             </tr>
-    
-<!-- ══ FOOTER ══ -->
-<tr>
-  <td class="pad" style="${S.ftCell}">
-    <p style="${S.ftP}">Villa Net provides access to thousands of professionally managed vacation rentals around the world. Please contact your travel advisor for more information.</p>
-  </td>
-</tr>
+
+            <!-- ══ SERVICES AVAILABLE FOR YOUR STAY ══ -->
+            <tr>
+              <td class="pad" style="background-color:#ffffff;padding:36px 40px 40px;border-top:1px solid #e5e7eb;">
+                <p style="font-size:20px;font-weight:700;color:#09090b;text-align:center;margin:0 0 28px 0;font-family:Arial,Helvetica,sans-serif;">Services Available for Your Stay</p>
+                <!--[if mso]><table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td width="50%" valign="top"><![endif]-->
+                <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%;">
+                  ${svcRowsHtml}
+                </table>
+                <!--[if mso]></td></tr></table><![endif]-->
+              </td>
+            </tr>
+
+            <!-- ══ FOOTER ══ -->
+            <tr>
+              <td class="pad" style="${S.ftCell}">
+                <p style="${S.ftP}">Villa Net provides access to thousands of professionally managed vacation rentals around the world. Please contact your travel advisor for more information.</p>
+              </td>
+            </tr>
     
           </table>
           <!-- /Inner container -->
@@ -1054,7 +1088,7 @@ btn:         "display:block;color:#ffffff;text-decoration:none;font-size:13px;fo
     
     </body>
     </html>`;
-    }
+  }
 
 // ─── Additional controllers ───────────────────────────────────────────────────
 
