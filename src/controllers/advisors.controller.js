@@ -8,21 +8,25 @@ const REFRESH_TTL_DAYS = Number(process.env.REFRESH_TTL_DAYS || 7);
 const ACCESS_TTL_MIN   = Number(process.env.ACCESS_TTL_MIN  || 15);
 
 // ✅ Usar las mismas funciones de firma que auth_controller para que /auth/me acepte el token
-function signAccess(payload) {
-  return jwt.sign(payload, process.env.JWT_ACCESS_SECRET, { expiresIn: `${ACCESS_TTL_MIN}m` });
+function signAccess(payload, ttlMinutes = ACCESS_TTL_MIN) {
+  return jwt.sign(payload, process.env.JWT_ACCESS_SECRET, {
+    expiresIn: `${ttlMinutes}m`,
+  });
 }
 
-function signRefresh(userId) {
-  return jwt.sign({ sub: userId }, process.env.JWT_REFRESH_SECRET, { expiresIn: `${REFRESH_TTL_DAYS}d` });
+function signRefresh(userId, ttlDays = REFRESH_TTL_DAYS) {
+  return jwt.sign({ sub: userId }, process.env.JWT_REFRESH_SECRET, {
+    expiresIn: `${ttlDays}d`,
+  });
 }
 
-function setRefreshCookie(res, token) {
+function setRefreshCookie(res, token, ttlDays = REFRESH_TTL_DAYS) {
   res.cookie('refresh_token', token, {
     httpOnly: true,
     secure: true,
     sameSite: 'none',
     path: '/auth/refresh',
-    maxAge: REFRESH_TTL_DAYS * 24 * 3600 * 1000,
+    maxAge: ttlDays * 24 * 3600 * 1000,
   });
 }
 
