@@ -62,6 +62,21 @@ async function logSyncError(message, errorDetail) {
   `, [message, JSON.stringify({ error: errorDetail })]);
 }
 
+// ─── Warm-up / ping ───────────────────────────────────────────────────────────
+async function pingDb(retries = 3, delayMs = 3000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await pool.query("SELECT 1");
+      console.log("✅ Conexión a DB verificada.");
+      return;
+    } catch (err) {
+      console.warn(`⚠️  Ping a DB falló (intento ${attempt}/${retries}): ${err.message}`);
+      if (attempt < retries) await sleep(delayMs);
+    }
+  }
+  throw new Error("No se pudo conectar a la DB después de varios intentos.");
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 async function syncAvailability() {
   const mode      = IS_FULL_SYNC ? "full" : "incremental";
@@ -80,6 +95,8 @@ async function syncAvailability() {
   } else {
     console.log("🔄 Modo FULL: forzando resync completo sin condiciones.");
   }
+
+  await pingDb();
 
   const startLogId = await logSyncStart(mode);
   let totalOk = 0;
