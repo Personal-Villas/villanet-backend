@@ -52,25 +52,25 @@ function verifyHashedCode(plainCode, hashedCode) {
   }
 }
 
-function signAccess(payload) {
+function signAccess(payload, ttlMinutes = ACCESS_TTL_MIN) {
   return jwt.sign(payload, process.env.JWT_ACCESS_SECRET, {
-    expiresIn: `${ACCESS_TTL_MIN}m`,
+    expiresIn: `${ttlMinutes}m`,
   });
 }
 
-function signRefresh(userId) {
+function signRefresh(userId, ttlDays = REFRESH_TTL_DAYS) {
   return jwt.sign({ sub: userId }, process.env.JWT_REFRESH_SECRET, {
-    expiresIn: `${REFRESH_TTL_DAYS}d`,
+    expiresIn: `${ttlDays}d`,
   });
 }
 
-function setRefreshCookie(res, token) {
+function setRefreshCookie(res, token, ttlDays = REFRESH_TTL_DAYS) {
   res.cookie("refresh_token", token, {
     httpOnly: true,
     secure: true,
     sameSite: "none",
     path: "/auth/refresh",
-    maxAge: REFRESH_TTL_DAYS * 24 * 3600 * 1000,
+    maxAge: ttlDays * 24 * 3600 * 1000,
   });
 }
 
@@ -227,7 +227,7 @@ export const AuthController = {
 
   // Paso 2: Verificar código y hacer login o registro
   async verifyCode(req, res) {
-    const { email, code, full_name } = req.body || {};
+    const { email, code, full_name, rememberMe } = req.body || {};
     if (!email || !code) {
       return res.status(400).json({ message: "Email and code required" });
     }
@@ -370,15 +370,16 @@ export const AuthController = {
         status: user.status,
         email: user.email,
       });
-      const refreshToken = signRefresh(user.id);
 
+      const refreshTtl = rememberMe ? 7 : 1;
+      const refreshToken = signRefresh(user.id, refreshTtl);
       await pool.query(
         `INSERT INTO refresh_tokens (user_id, token, expires_at) 
-         VALUES ($1, $2, CURRENT_TIMESTAMP + interval '${REFRESH_TTL_DAYS} days')`,
+        VALUES ($1, $2, CURRENT_TIMESTAMP + interval '${refreshTtl} days')`,
         [user.id, refreshToken],
       );
 
-      setRefreshCookie(res, refreshToken);
+      setRefreshCookie(res, refreshToken, refreshTtl);
 
       const ip = req.ip;
       const ua = req.headers["user-agent"];
@@ -450,7 +451,7 @@ export const AuthController = {
   },
 
   async login(req, res) {
-    const { email, password } = req.body || {};
+    const { email, password, rememberMe } = req.body || {};
     const ip = req.ip;
     const ua = req.headers["user-agent"];
 
@@ -495,12 +496,13 @@ export const AuthController = {
       status: user.status,
       email: user.email,
     });
-    const refreshToken = signRefresh(user.id);
+    const refreshTtl = rememberMe ? 7 : 1;
+    const refreshToken = signRefresh(user.id, refreshTtl);
     await pool.query(
-      `INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1,$2, CURRENT_TIMESTAMP + interval '${REFRESH_TTL_DAYS} days')`,
+      `INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1,$2, CURRENT_TIMESTAMP + interval '${refreshTtl} days')`,
       [user.id, refreshToken],
     );
-    setRefreshCookie(res, refreshToken);
+    setRefreshCookie(res, refreshToken, refreshTtl);
 
     res.json({
       accessToken,
