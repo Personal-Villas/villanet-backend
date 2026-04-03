@@ -153,6 +153,7 @@ async function syncAvailability() {
             try {
               await upsertAvailabilityData(listingId, propertyData.days);
               await updateSyncStatus(listingId, "ok");
+              await updatePriceUsdFromAvailability(listingId);
               totalOk++;
             } catch (error) {
               console.error(`❌ Error persistiendo listing ${listingId}:`, error.message);
@@ -252,6 +253,37 @@ async function updateSyncStatus(listingId, status) {
      WHERE listing_id = $2`,
     [status, listingId],
   );
+}
+
+/**
+ * Actualiza listings.price_usd con el precio del día disponible más cercano
+ * a la fecha actual en listing_availability. Reemplaza el precio rack estático
+ * de Guesty por el precio real del calendario, que es la fuente que usa la card
+ * y el filtro.
+ *
+ * Condicion: debe existir al menos un día disponible con precio > 0
+ * desde hoy en adelante. Si no se cumple, no modifica el valor actual.
+ */
+async function updatePriceUsdFromAvailability(listingId) {
+  const { rows } = await pool.query(`
+    SELECT price_usd
+    FROM listing_availability
+    WHERE listing_id = $1
+      AND date >= CURRENT_DATE
+      AND available = true
+      AND price_usd > 0
+      AND cta = false
+    ORDER BY date ASC
+    LIMIT 1
+  `, [listingId]);
+
+  if (!rows.length || rows[0].price_usd === null) return false;
+
+  await pool.query(
+    `UPDATE listings SET price_usd = $1 WHERE listing_id = $2`,
+    [rows[0].price_usd, listingId]
+  );
+  return true;
 }
 
 syncAvailability();
