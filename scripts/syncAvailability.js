@@ -256,13 +256,13 @@ async function updateSyncStatus(listingId, status) {
 }
 
 /**
- * Actualiza listings.price_usd con el precio del día disponible más cercano
- * a la fecha actual en listing_availability. Reemplaza el precio rack estático
- * de Guesty por el precio real del calendario, que es la fuente que usa la card
- * y el filtro.
+ * Actualiza listings.price_usd con el precio mínimo de los próximos 60 días
+ * disponibles en listing_availability. Refleja el "Starting at" real de la
+ * propiedad — el precio más bajo que un advisor puede encontrar en el período
+ * cercano, consistente con el label que muestran las cards y PropertyDetail.
  *
  * Condicion: debe existir al menos un día disponible con precio > 0
- * desde hoy en adelante. Si no se cumple, no modifica el valor actual.
+ * en los próximos 60 días. Si no se cumple, no modifica el valor actual.
  */
 async function updatePriceUsdFromAvailability(listingId) {
   const { rows } = await pool.query(`
@@ -270,10 +270,11 @@ async function updatePriceUsdFromAvailability(listingId) {
     FROM listing_availability
     WHERE listing_id = $1
       AND date >= CURRENT_DATE
+      AND date < CURRENT_DATE + INTERVAL '60 days'
       AND available = true
       AND price_usd > 0
       AND cta = false
-    ORDER BY date ASC
+    ORDER BY price_usd ASC
     LIMIT 1
   `, [listingId]);
 

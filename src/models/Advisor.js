@@ -75,7 +75,7 @@ export const Advisor = {
         a.advisor_type, a.travel_regions, a.typical_group_size,
         a.villa_budget_range, a.commission_preference, a.website,
         a.profile_completion_percentage, a.created_at,
-        u.avatar_url, u.full_name, u.id AS user_id
+        u.avatar_url, u.full_name, u.id AS user_id, a.preferred_currency as preferred_currency
       FROM advisors a
       LEFT JOIN users u ON u.email = a.email
       WHERE a.email = $1
@@ -93,7 +93,7 @@ export const Advisor = {
       WHERE email = $1
       RETURNING id, first_name, last_name, email, advisor_type,
                 travel_regions, typical_group_size, villa_budget_range,
-                commission_preference, website, profile_completion_percentage
+                commission_preference, website, profile_completion_percentage, preferred_currency
     `;
     const result = await pool.query(query, [email, website ?? null]);
     return result.rows[0];
