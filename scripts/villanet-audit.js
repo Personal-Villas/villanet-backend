@@ -7,6 +7,8 @@
  *
  * Solo procesa registros donde: villanet_enabled = true
  * El campo is_listed se audita y actualiza según la columna "Villa Net Listing Status" del xlsx.
+ * Las propiedades inactivas (villanet_enabled=false o is_listed=false) también se incluyen
+ * si aparecen en el xlsx, asegurando que sus datos se actualicen igualmente.
  *
  * Matching:
  *   - Si la fila del xlsx tiene columna "listing_id" con valor → match directo por ID
@@ -245,7 +247,6 @@ async function loadFromDB(pool) {
       l.is_listed,
       ${dbCols}
     FROM listings l
-    WHERE l.villanet_enabled = true
     ORDER BY l.name
   `);
   return rows;
@@ -355,7 +356,7 @@ async function main() {
   const dbById = new Map(dbRows.map(r => [r.listing_id, r]));
 
   console.log(`✅  XLSX (catálogo Robbie)          : ${xlsxRows.length} propiedades`);
-  console.log(`✅  DB (villanet_enabled)            : ${dbRows.length} propiedades`);
+  console.log(`✅  DB (activas + inactivas)         : ${dbRows.length} propiedades`);
   console.log(`🔑  Modo matching                   : ${hasIdCol ? 'listing_id directo (con fallback fuzzy)' : 'fuzzy por nombre'}`);
   console.log(`🔎  Fuzzy threshold                 : ${THRESHOLD}${hasIdCol ? ' (solo fallback)' : ''}`);
   console.log(`📋  Campos auditados                : ${ACTIVE_FIELD_MAP.length}`);
@@ -392,12 +393,19 @@ async function main() {
         match  = directMatch;
         score  = 1000;   // sentinel: match exacto por ID
         method = 'id';
+        // Advertir si la propiedad está inactiva, pero se audita/actualiza igualmente
+        if (!directMatch.villanet_enabled || !directMatch.is_listed) {
+          const flags = [];
+          if (!directMatch.villanet_enabled) flags.push('villanet_enabled=false');
+          if (!directMatch.is_listed)        flags.push('is_listed=false');
+          console.log(`  ⚠️  Inactiva: "${directMatch.name}" (${directMatch.listing_id}) [${flags.join(', ')}] — se auditará igualmente`);
+        }
       } else {
-        // ID existe en xlsx pero no en la vista activa de DB
+        // listing_id del xlsx no existe en DB
         results.id_not_in_db.push({
           xlsx_name:    xlsxRow.xlsxName,
           listing_id:   xlsxRow.xlsxListingId,
-          reason:       'not in DB (villanet_enabled=false or listing not found)',
+          reason:       'listing_id not found in DB',
         });
         continue;
       }
@@ -469,14 +477,14 @@ async function main() {
   console.log(`⚠️   Matched con diferencias  : ${results.matched_diffs.length}`);
   console.log(`❌  Sin match en DB           : ${results.no_match.length}`);
   if (results.id_not_in_db.length > 0) {
-    console.log(`🔴  ID en xlsx no activa en DB: ${results.id_not_in_db.length}`);
+    console.log(`🔴  ID en xlsx no encontrado en DB: ${results.id_not_in_db.length}`);
   }
   console.log(`📊  Total discrepancias       : ${allDiscrepancies.length}`);
   console.log('─'.repeat(60));
 
   if (results.id_not_in_db.length > 0) {
-    console.log('\n🔴  LISTING_IDs EN XLSX SIN MATCH ACTIVO EN DB:');
-    console.log('    (propiedad existe en DB pero villanet_enabled=false o is_listed=false)\n');
+    console.log('\n🔴  LISTING_IDs EN XLSX NO ENCONTRADOS EN DB:');
+    console.log('    (el listing_id del xlsx no existe en la tabla listings)\n');
     for (const r of results.id_not_in_db) {
       console.log(`    • "${r.xlsx_name}"  →  ${r.listing_id}`);
     }
@@ -579,7 +587,7 @@ async function main() {
 
   if (results.id_not_in_db.length > 0) {
     csvLines.push('');
-    csvLines.push('## ID EN XLSX NO ACTIVA EN DB — villanet_enabled=false o is_listed=false');
+    csvLines.push('## ID EN XLSX NO ENCONTRADO EN DB — listing_id no existe en la tabla listings');
     csvLines.push('listing_id,xlsx_name,reason');
     for (const r of results.id_not_in_db) {
       csvLines.push([esc(r.listing_id), esc(r.xlsx_name), esc(r.reason)].join(','));
