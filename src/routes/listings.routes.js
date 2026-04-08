@@ -192,6 +192,13 @@ r.get("/", auth(false), async (req, res) => {
       params.push(Number(maxPrice));
       clauses.push(`l.price_usd <= $${params.length}`);
     }
+    // maxTotalBudget sin fechas: no podemos calcular total exacto sin noches,
+    // así que filtramos propiedades cuyo precio base ya supera el presupuesto total.
+    // Con fechas, este filtro lo aplica checkAvailabilityFromCache() con el total real.
+    if (maxTotalBudget && !checkIn && !checkOut) {
+      params.push(Number(maxTotalBudget));
+      clauses.push(`l.price_usd <= $${params.length}`);
+    }
 
     // Guests
     if (guests) {
@@ -783,25 +790,24 @@ async function checkAvailabilityFromCache(candidateIds, checkIn, checkOut, maxTo
   let queryText, queryParams;
 
   if (maxTotalBudget !== null) {
+    // FEES_MARKUP_FACTOR: factor sobre el base rate para aproximar cleaning + service fee + taxes.
+    // 1.30 = asumimos que los fees totales representan ~30% del base rate en promedio.
+    // Ajustar si el portfolio tiene fees significativamente mayores o menores.
+    const FEES_MARKUP_FACTOR = 1.30;
     queryText = `
       SELECT la.listing_id
       FROM listing_availability la
-      JOIN listings l ON l.listing_id = la.listing_id
       WHERE la.listing_id = ANY($1::text[])
         AND la.date >= $2
         AND la.date < $3
         AND la.available = true
         AND la.cta = false
         AND la.ctd = false
-      GROUP BY la.listing_id, l.fees
+      GROUP BY la.listing_id
       HAVING
         COUNT(*) = $4
         AND MIN(CASE WHEN la.date = $2 THEN la.min_nights ELSE NULL END) <= $4
-        AND SUM(la.price_usd) <= (
-          $5
-          - COALESCE((l.fees->>'cleaning')::numeric, 0)
-          - COALESCE((l.fees->>'otherFees')::numeric, 0)
-        )
+        AND (SUM(la.price_usd) * ${FEES_MARKUP_FACTOR}) <= $5
     `;
     queryParams = [candidateIds, checkIn, checkOut, nights, maxTotalBudget];
   } else {

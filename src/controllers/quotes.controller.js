@@ -324,7 +324,12 @@ export async function sendQuoteEmail(req, res) {
     const {
       guestFirstName, guestLastName, travelAdvisorEmail,
       guestEmail, checkIn, checkOut, guests, items,
+      displayCurrency = 'USD',
     } = req.body;
+
+    // Validar moneda
+    const SUPPORTED_CURRENCIES = ['USD', 'EUR', 'CAD'];
+    const safeCurrency = SUPPORTED_CURRENCIES.includes(displayCurrency) ? displayCurrency : 'USD';
 
     const userId = req.user?.sub;
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -499,7 +504,8 @@ export async function sendQuoteEmail(req, res) {
     const advisorHtml = await generateQuoteEmailHtml(
       { ...quote, recipient_type: "advisor" },
       itemsWithFullData, nights, checkInYmd, checkOutYmd, pmLogoUrl, pmName,
-      taLogoUrl, taName, taFirstName
+      taLogoUrl, taName, taFirstName,
+      safeCurrency
     );
 
     let advisorEmailSent = false;
@@ -524,7 +530,8 @@ export async function sendQuoteEmail(req, res) {
         const guestHtml = await generateQuoteEmailHtml(
           { ...quote, recipient_type: "guest" },
           itemsWithFullData, nights, checkInYmd, checkOutYmd, pmLogoUrl, pmName,
-          taLogoUrl, taName, taFirstName
+          taLogoUrl, taName, taFirstName,
+          safeCurrency
         );
         await sendEmail({
           to: quote.guest_email,
@@ -642,6 +649,7 @@ export async function generateQuoteEmailHtml(
   taLogoUrl = null,
   taName = null,
   taFirstName = null,
+  displayCurrency = 'USD',
 ) {
   const formatDate = (dateStr) => {
     if (!dateStr) return "Flexible Dates";
@@ -662,6 +670,25 @@ export async function generateQuoteEmailHtml(
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     }).format(amount);
+  };
+
+  // ── Currency conversion (indicative, display only) ──────────────────────
+  const DISPLAY_RATES = { USD: 1.00, EUR: 0.92, CAD: 1.36 };
+  const DISPLAY_SYMBOLS = { USD: '$', EUR: '€', CAD: 'CA$' };
+  const RATE_DATE = 'Apr 2025';
+
+  const showAltCurrency = displayCurrency !== 'USD';
+  const altRate   = DISPLAY_RATES[displayCurrency] || 1;
+
+  const fmtAlt = (amountUSD) => {
+    if (!amountUSD && amountUSD !== 0) return '';
+    const converted = amountUSD * altRate;
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: displayCurrency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(converted);
   };
 
   const safeNights = nights || 1;
@@ -906,6 +933,13 @@ export async function generateQuoteEmailHtml(
                     <td style="${S.bdTotalLabel}">Total</td>
                     <td style="${S.bdTotalVal}">${fmt(b.total)}</td>
                   </tr>
+                  ${showAltCurrency ? `
+                  <tr>
+                    <td colspan="2" style="padding:4px 0 10px 0;font-size:11px;color:#71717a;text-align:right;">
+                      ≈ ${fmtAlt(b.total)} ${displayCurrency}
+                      &nbsp;·&nbsp; indicative rate
+                    </td>
+                  </tr>` : ''}
                 </table>
               </td>
             </tr>
@@ -1075,6 +1109,12 @@ export async function generateQuoteEmailHtml(
             <tr>
               <td class="pad" style="${S.ftCell}">
                 <p style="${S.ftP}">Villa Net provides access to thousands of professionally managed vacation rentals around the world. Please contact your travel advisor for more information.</p>
+                ${showAltCurrency ? `
+                <p style="${S.ftP}">
+                  * ${displayCurrency} amounts shown for reference only
+                  (1 USD = ${altRate} ${displayCurrency}, ${RATE_DATE}).
+                  Actual billing is always processed in USD.
+                </p>` : ''}
               </td>
             </tr>
     

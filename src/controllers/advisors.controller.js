@@ -207,7 +207,13 @@ export const advisorsController = {
         return res.status(404).json({ success: false, message: 'Advisor profile not found' });
       }
  
-      res.json({ success: true, profile });
+      res.json({
+        success: true,
+        profile: {
+          ...profile,
+          preferred_currency: profile.preferred_currency || 'USD',
+        },
+      });
     } catch (error) {
       console.error('Get advisor profile error:', error);
       res.status(500).json({ success: false, message: 'Internal server error' });
@@ -216,15 +222,24 @@ export const advisorsController = {
 
   // PATCH /advisors/profile
   // Requiere: auth() middleware
-  // Body: { website }
+  // Body: { website, preferred_currency }
   async updateProfile(req, res) {
     try {
       const email = req.user?.email;
       if (!email) return res.status(401).json({ success: false, message: 'Unauthorized' });
  
-      const { website } = req.body;
- 
-      const updated = await Advisor.updateProfile(email, { website });
+      const { website, preferred_currency } = req.body;
+
+      // Validar moneda si viene
+      const SUPPORTED_CURRENCIES = ['USD', 'EUR', 'CAD'];
+      if (preferred_currency && !SUPPORTED_CURRENCIES.includes(preferred_currency)) {
+        return res.status(400).json({ error: 'Invalid currency. Supported: USD, EUR, CAD' });
+      }
+
+      const updated = await Advisor.updateProfile(email, {
+        website,
+        ...(preferred_currency !== undefined && { preferred_currency }),
+      });
       if (!updated) {
         return res.status(404).json({ success: false, message: 'Advisor not found' });
       }

@@ -153,6 +153,7 @@ async function syncAvailability() {
             try {
               await upsertAvailabilityData(listingId, propertyData.days);
               await updateSyncStatus(listingId, "ok");
+              await updatePriceUsdFromAvailability(listingId);
               totalOk++;
             } catch (error) {
               console.error(`❌ Error persistiendo listing ${listingId}:`, error.message);
@@ -252,6 +253,38 @@ async function updateSyncStatus(listingId, status) {
      WHERE listing_id = $2`,
     [status, listingId],
   );
+}
+
+/**
+ * Actualiza listings.price_usd con el precio mínimo de los próximos 60 días
+ * disponibles en listing_availability. Refleja el "Starting at" real de la
+ * propiedad — el precio más bajo que un advisor puede encontrar en el período
+ * cercano, consistente con el label que muestran las cards y PropertyDetail.
+ *
+ * Condicion: debe existir al menos un día disponible con precio > 0
+ * en los próximos 60 días. Si no se cumple, no modifica el valor actual.
+ */
+async function updatePriceUsdFromAvailability(listingId) {
+  const { rows } = await pool.query(`
+    SELECT price_usd
+    FROM listing_availability
+    WHERE listing_id = $1
+      AND date >= CURRENT_DATE
+      AND date < CURRENT_DATE + INTERVAL '60 days'
+      AND available = true
+      AND price_usd > 0
+      AND cta = false
+    ORDER BY price_usd ASC
+    LIMIT 1
+  `, [listingId]);
+
+  if (!rows.length || rows[0].price_usd === null) return false;
+
+  await pool.query(
+    `UPDATE listings SET price_usd = $1 WHERE listing_id = $2`,
+    [rows[0].price_usd, listingId]
+  );
+  return true;
 }
 
 syncAvailability();
