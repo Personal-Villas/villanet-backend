@@ -1,6 +1,8 @@
 const DISCORD_WEBHOOK_ACCESS = process.env.DISCORD_WEBHOOK_ACCESS;
 const DISCORD_WEBHOOK_QUOTES = process.env.DISCORD_WEBHOOK_QUOTES;
 const DISCORD_WEBHOOK_SYNC   = process.env.DISCORD_WEBHOOK_SYNC;
+const DISCORD_WEBHOOK_INQUIRIES = process.env.DISCORD_WEBHOOK_INQUIRIES;
+
 
 const TIMEOUT_MS = 5000;
 
@@ -179,4 +181,46 @@ export function notifySafely(notificationFn) {
     .catch((error) => {
       console.error("🔕 Discord notification failed (non-blocking):", error.message);
     });
+}
+// ─── Notificacion de Consulta de Villa ────────────────────────────────────────
+
+/**
+ * Envía a Discord una notificación cuando un usuario usa el formulario
+ * "Ask about this villa" en Properties o PropertyDetail.
+ *
+ * @param {Object} data
+ * @param {string} data.villaId       - ID de la villa
+ * @param {string} data.villaName     - Nombre de la villa
+ * @param {string} data.message       - Texto de la consulta
+ * @param {string} [data.clientEmail] - Email del usuario (si está logueado)
+ * @param {string} [data.clientName]  - Nombre del usuario (si está disponible)
+ * @param {string} [data.villaUrl]    - URL completa a la página de la villa
+ */
+export async function sendInquiryNotification(data) {
+  const { villaId, villaName, message, clientEmail, clientName, villaUrl } = data;
+
+  const clientDisplay = clientName
+    ? `${clientName}${clientEmail ? ` (${clientEmail})` : ''}`
+    : clientEmail || 'Anonymous';
+
+  const villaLink = villaUrl || `https://thevillanet.com/property/${villaId}`;
+
+  const embed = {
+    embeds: [{
+      title: '💬 New Villa Inquiry',
+      color: 0x6366f1, // indigo
+      description: `A visitor sent a question about **${villaName}**.`,
+      fields: [
+        { name: '🏠 Villa',    value: `[${villaName}](${villaLink})`, inline: true  },
+        { name: '👤 Client',   value: clientDisplay,                  inline: true  },
+        { name: '✉️ Message',  value: message.slice(0, 1024),         inline: false },
+        { name: '🔗 View Villa', value: villaLink,                    inline: false },
+        { name: '⏰ Timestamp', value: formatTimestamp(new Date()),   inline: false },
+      ],
+      footer: { text: 'The Villa Net • Inquiry System' },
+      timestamp: new Date().toISOString(),
+    }],
+  };
+
+  return sendToDiscord(DISCORD_WEBHOOK_INQUIRIES, embed);
 }
