@@ -470,8 +470,11 @@ r.get("/", auth(false), async (req, res) => {
       `✅ [Privado FullScan] Returning ${returned}/${lim} items, cursor ${cursorPos}→${nextCursor}, exhausted: ${session.exhausted}, hasMore: ${hasMore}`,
     );
 
-    mark('availability: sending response');
+    mark('availability: normalizing results');
+    const normalizedAvailability = normalizeResults(detailRows);
+    mark('availability: sending response')
     return res.json({
+      results: normalizedAvailability,
       availabilitySession: sessionId,
       cursor: offset,
       nextCursor,
@@ -485,6 +488,7 @@ r.get("/", auth(false), async (req, res) => {
       totalPages: Math.ceil(session.availableIds.length / lim) || 1,
       total: session.availableIds.length,
       hasMore: hasMore,
+      availabilityApplied: true,   
     });
   } catch (err) {
     console.error("❌ [Privado API] Listings error:", err);
