@@ -683,7 +683,7 @@ function buildBadgeFilters(badgeSlugs, VILLANET_BADGE_FIELD_MAP) {
 function normalizeResults(rows) {
   const PLACEHOLDER =
     "https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200";
-  const MAX_GRID_IMAGES = 3; // ⬅️ NUEVO: límite para el grid
+  const MAX_GRID_IMAGES = 10; // ⬅️ STRESS TEST: aumentado de 3 → 10 (solo DEV)
 
   return rows.map((r) => {
     const normalizeBoolean = (value) => {
