@@ -41,15 +41,6 @@ r.get("/", auth(false), async (req, res) => {
     const currentPage = Math.max(parseInt(page) || 1, 1);
     const cursorPos = Math.max(parseInt(cursor) || 0, 0);
 
-    // ── Perf timer ────────────────────────────────────────────
-    const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const t = (label) => console.log(`⏱️  [listings/${reqId}] ${label}`);
-    const mark = (() => {
-      const start = Date.now();
-      return (label) => t(`${label} +${Date.now() - start}ms`);
-    })();
-    mark("start");
-    // ─────────────────────────────────────────────────────────
 
     // ✅ SOLO activar availability cuando ambos dates están completos (IDÉNTICO)
     const hasAvailabilityFilter = !!(checkIn && checkOut);
@@ -62,7 +53,6 @@ r.get("/", auth(false), async (req, res) => {
     let VILLANET_BADGE_FIELD_MAP = cache.get("villanet_badge_map");
 
     if (!VILLANET_BADGE_FIELD_MAP) {
-      mark("badge-map cache miss → querying DB");
       const { rows: villaNetBooleanFields } = await pool.query(`
         SELECT column_name
         FROM information_schema.columns 
@@ -83,7 +73,6 @@ r.get("/", auth(false), async (req, res) => {
       cache.set("villanet_badge_map", VILLANET_BADGE_FIELD_MAP, 3600000);
     }
 
-    mark("badge-map ready");
 
     /***********************
      * SQL FILTERS IDÉNTICOS
@@ -305,12 +294,10 @@ r.get("/", auth(false), async (req, res) => {
         ${whereSQL};
       `;
 
-      mark("no-availability: firing DB queries");
       const [rows, count] = await Promise.all([
         pool.query(sql, [...params, lim, offset]),
         pool.query(countSQL, params),
       ]);
-      mark("no-availability: DB queries done");
 
       const total = count.rows[0].total;
       const totalPages = Math.ceil(total / lim);
@@ -319,9 +306,7 @@ r.get("/", auth(false), async (req, res) => {
         `✅ [Privado - No Availability] Page ${currentPage}/${totalPages}, showing ${rows.rows.length} items`,
       );
 
-      mark("no-availability: normalizing results");
       const normalized = normalizeResults(rows.rows);
-      mark("no-availability: sending response");
 
       return res.json({
         results: normalized,
@@ -389,9 +374,7 @@ r.get("/", auth(false), async (req, res) => {
       return { session, sessionId: availabilitySession, isNew: false };
     };
 
-    mark("availability: ensuring session");
     const { session, sessionId, isNew } = await ensureAvailabilitySession();
-    mark(`availability: session ready (isNew=${isNew})`);
 
     // 🔥 ESTRATEGIA: Full Scan — escanear hasta tener lim resultados o agotar candidatos
     if (isNew || session.availableIds.length < neededEnd) {
@@ -458,13 +441,11 @@ r.get("/", auth(false), async (req, res) => {
 
     // 4️⃣ DEVOLVER PÁGINA COMPLETA (o lo que haya si exhausted/timeout)
     const pageIds = session.availableIds.slice(offset, offset + lim);
-    mark(`availability: fetchDetails for ${pageIds.length} ids`);
     const detailRows = await fetchDetails(
       pageIds,
       badgeSlugs,
       VILLANET_BADGE_FIELD_MAP,
     );
-    mark("availability: fetchDetails done");
 
     const returned = detailRows.length;
     const nextCursor = offset + returned;
