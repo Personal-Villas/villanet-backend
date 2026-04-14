@@ -48,7 +48,7 @@ r.get("/", auth(false), async (req, res) => {
       const start = Date.now();
       return (label) => t(`${label} +${Date.now() - start}ms`);
     })();
-    mark('start');
+    mark("start");
     // ─────────────────────────────────────────────────────────
 
     // ✅ SOLO activar availability cuando ambos dates están completos (IDÉNTICO)
@@ -62,7 +62,7 @@ r.get("/", auth(false), async (req, res) => {
     let VILLANET_BADGE_FIELD_MAP = cache.get("villanet_badge_map");
 
     if (!VILLANET_BADGE_FIELD_MAP) {
-      mark('badge-map cache miss → querying DB');
+      mark("badge-map cache miss → querying DB");
       const { rows: villaNetBooleanFields } = await pool.query(`
         SELECT column_name
         FROM information_schema.columns 
@@ -83,7 +83,7 @@ r.get("/", auth(false), async (req, res) => {
       cache.set("villanet_badge_map", VILLANET_BADGE_FIELD_MAP, 3600000);
     }
 
-    mark('badge-map ready');
+    mark("badge-map ready");
 
     /***********************
      * SQL FILTERS IDÉNTICOS
@@ -96,7 +96,11 @@ r.get("/", auth(false), async (req, res) => {
 
     // 1. FILTRO DE DESTINO — soporta uno o múltiples destinos (OR entre ellos)
     const destinationsList = destinations?.toString().trim()
-      ? destinations.toString().split('|').map(d => d.trim()).filter(Boolean)
+      ? destinations
+          .toString()
+          .split("|")
+          .map((d) => d.trim())
+          .filter(Boolean)
       : destination?.toString().trim()
         ? [destination.toString().trim()]
         : [];
@@ -123,7 +127,6 @@ r.get("/", auth(false), async (req, res) => {
           l.country = ANY($${idx}::text[])
         )`);
       }
-
     } else if (q?.toString().trim()) {
       searchTerm = q.toString().trim();
       // 2. Búsqueda General (Solo si NO hay destino seleccionado)
@@ -131,7 +134,7 @@ r.get("/", auth(false), async (req, res) => {
       const searchTerm = q.toString().trim();
       params.push(`%${searchTerm.toLowerCase()}%`);
       const idx = params.length;
-      
+
       clauses.push(`(
         unaccent(LOWER(l.name)) ILIKE unaccent($${idx}) OR 
         unaccent(LOWER(l.villanet_destination_tag)) ILIKE unaccent($${idx}) OR 
@@ -302,12 +305,12 @@ r.get("/", auth(false), async (req, res) => {
         ${whereSQL};
       `;
 
-      mark('no-availability: firing DB queries');
+      mark("no-availability: firing DB queries");
       const [rows, count] = await Promise.all([
         pool.query(sql, [...params, lim, offset]),
         pool.query(countSQL, params),
       ]);
-      mark('no-availability: DB queries done');
+      mark("no-availability: DB queries done");
 
       const total = count.rows[0].total;
       const totalPages = Math.ceil(total / lim);
@@ -316,9 +319,9 @@ r.get("/", auth(false), async (req, res) => {
         `✅ [Privado - No Availability] Page ${currentPage}/${totalPages}, showing ${rows.rows.length} items`,
       );
 
-      mark('no-availability: normalizing results');
+      mark("no-availability: normalizing results");
       const normalized = normalizeResults(rows.rows);
-      mark('no-availability: sending response');
+      mark("no-availability: sending response");
 
       return res.json({
         results: normalized,
@@ -386,7 +389,7 @@ r.get("/", auth(false), async (req, res) => {
       return { session, sessionId: availabilitySession, isNew: false };
     };
 
-    mark('availability: ensuring session');
+    mark("availability: ensuring session");
     const { session, sessionId, isNew } = await ensureAvailabilitySession();
     mark(`availability: session ready (isNew=${isNew})`);
 
@@ -428,11 +431,15 @@ r.get("/", auth(false), async (req, res) => {
         session.cursor += candidateIds.length;
 
         // 2️⃣ Verificar disponibilidad desde caché local (CA1: sin llamadas a Guesty)
-        const availableInChunk = await checkAvailabilityFromCache(candidateIds, checkIn, checkOut, session.maxTotalBudget)
-          .catch((err) => {
-            console.warn(`[Privado FullScan] Cache check failed:`, err.message);
-            return [];
-          });
+        const availableInChunk = await checkAvailabilityFromCache(
+          candidateIds,
+          checkIn,
+          checkOut,
+          session.maxTotalBudget,
+        ).catch((err) => {
+          console.warn(`[Privado FullScan] Cache check failed:`, err.message);
+          return [];
+        });
 
         session.availableIds.push(...availableInChunk);
         console.log(
@@ -457,7 +464,7 @@ r.get("/", auth(false), async (req, res) => {
       badgeSlugs,
       VILLANET_BADGE_FIELD_MAP,
     );
-    mark('availability: fetchDetails done');
+    mark("availability: fetchDetails done");
 
     const returned = detailRows.length;
     const nextCursor = offset + returned;
@@ -470,8 +477,8 @@ r.get("/", auth(false), async (req, res) => {
       `✅ [Privado FullScan] Returning ${returned}/${lim} items, cursor ${cursorPos}→${nextCursor}, exhausted: ${session.exhausted}, hasMore: ${hasMore}`,
     );
 
-    mark('availability: sending response');
     return res.json({
+      results: normalizeResults(detailRows), 
       availabilitySession: sessionId,
       cursor: offset,
       nextCursor,
@@ -785,7 +792,6 @@ function normalizeResults(rows) {
   });
 }
 
-
 /**
  * checkAvailabilityFromCache
  * Reemplaza getAvailabilityFor() consultando listing_availability en DB.
@@ -797,10 +803,15 @@ function normalizeResults(rows) {
  * @param {string} checkOut YYYY-MM-DD
  * @returns {Promise<string[]>} IDs disponibles
  */
-async function checkAvailabilityFromCache(candidateIds, checkIn, checkOut, maxTotalBudget = null) {
+async function checkAvailabilityFromCache(
+  candidateIds,
+  checkIn,
+  checkOut,
+  maxTotalBudget = null,
+) {
   if (!candidateIds.length) return [];
 
-  const checkInDate  = new Date(checkIn);
+  const checkInDate = new Date(checkIn);
   const checkOutDate = new Date(checkOut);
   const nights = Math.round((checkOutDate - checkInDate) / 86400000);
   if (nights <= 0) return [];
@@ -815,7 +826,7 @@ async function checkAvailabilityFromCache(candidateIds, checkIn, checkOut, maxTo
     // FEES_MARKUP_FACTOR: factor sobre el base rate para aproximar cleaning + service fee + taxes.
     // 1.30 = asumimos que los fees totales representan ~30% del base rate en promedio.
     // Ajustar si el portfolio tiene fees significativamente mayores o menores.
-    const FEES_MARKUP_FACTOR = 1.30;
+    const FEES_MARKUP_FACTOR = 1.3;
     queryText = `
       SELECT la.listing_id
       FROM listing_availability la
@@ -853,11 +864,13 @@ async function checkAvailabilityFromCache(candidateIds, checkIn, checkOut, maxTo
   const { rows } = await pool.query(queryText, queryParams);
 
   const ms = Date.now() - t0;
-  console.log(`⚡ [checkAvailabilityFromCache] ${rows.length}/${candidateIds.length} disponibles en ${ms}ms${maxTotalBudget ? ` (budget: $${maxTotalBudget})` : ''}`);
+  console.log(
+    `⚡ [checkAvailabilityFromCache] ${rows.length}/${candidateIds.length} disponibles en ${ms}ms${maxTotalBudget ? ` (budget: $${maxTotalBudget})` : ""}`,
+  );
 
   // ✅ Preservar el orden original de candidateIds (la query SQL no garantiza orden)
-  const availableSet = new Set(rows.map(r => r.listing_id));
-  return candidateIds.filter(id => availableSet.has(id));
+  const availableSet = new Set(rows.map((r) => r.listing_id));
+  return candidateIds.filter((id) => availableSet.has(id));
 }
 
 export default r;
