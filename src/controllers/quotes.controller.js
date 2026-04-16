@@ -488,7 +488,7 @@ export async function sendQuoteEmail(req, res) {
       { filename: "calendar-arrow-up.png",   path: `${ICONS_DIR}/calendar-arrow-up.png`,   cid: "calendar-arrow-up@villanet"   },
       { filename: "calendar-arrow-down.png", path: `${ICONS_DIR}/calendar-arrow-down.png`, cid: "calendar-arrow-down@villanet" },
       { filename: "cloud-moon.png",          path: `${ICONS_DIR}/cloud-moon.png`,          cid: "cloud-moon@villanet"          },
-      { filename: "users.png",               path: `${ICONS_DIR}/users.png`,               cid: "users@villanet"               },
+      ...(quote.guests ? [{ filename: "users.png", path: `${ICONS_DIR}/users.png`, cid: "users@villanet" }] : []),
       { filename: "square-check-big.png",    path: `${ICONS_DIR}/square-check-big.png`,    cid: "square-check-big@villanet"    },
       { filename: "plane.png",               path: `${ICONS_DIR}/plane.png`,               cid: "plane@villanet"               },
       { filename: "car.png",                 path: `${ICONS_DIR}/car.png`,                 cid: "car@villanet"                 },
@@ -725,7 +725,7 @@ export async function generateQuoteEmailHtml(
   const S = {
     body:        "margin:0;padding:0;background-color:#f4f4f5;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#09090b;",
     outerTable:  "border-collapse:collapse;width:100%;background-color:#f4f4f5;",
-    wrap:        "width:660px;max-width:660px;",
+    wrap:        "width:660px;max-width:660px;min-width:280px;",
 
     // Header
     hdCell:      "background-color:#ffffff;padding:36px 40px 28px;text-align:center;border-bottom:1px solid #e5e7eb;",
@@ -881,8 +881,8 @@ export async function generateQuoteEmailHtml(
       ${
         item.image_url
           ? `<tr>
-               <td style="padding:0;line-height:0;">
-                 <img src="${item.image_url}" width="600" style="${S.cardImg}" alt="${item.listing_name || "Villa"}">
+               <td class="card-img-td" style="padding:0;line-height:0;font-size:0;">
+                 <img src="${item.image_url}" width="100%" class="card-img" style="${S.cardImg}" alt="${item.listing_name || "Villa"}">
                </td>
              </tr>`
           : ""
@@ -1036,10 +1036,19 @@ export async function generateQuoteEmailHtml(
         img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
         /* Responsive — survives forward better than layout styles */
         @media only screen and (max-width: 700px) {
-          .wrap { width: 100% !important; max-width: 680px !important; }
+          /* Full-width container — key fix for the narrow column issue */
+          .wrap { width: 100% !important; max-width: 100% !important; }
+          /* Remove outer vertical padding so email fills the screen edge-to-edge */
+          .outer-td { padding: 0 !important; }
+          /* Reduce horizontal padding on all section cells */
+          .pad { padding-left: 16px !important; padding-right: 16px !important; }
+          /* Trip bar: stack cells vertically */
           .trip-td { display: block !important; width: 100% !important; border-left: none !important; border-bottom: 1px solid #e5e7eb !important; padding: 12px 16px !important; box-sizing: border-box !important; }
-          .card-img { height: 180px !important; }
-          .pad { padding-left: 20px !important; padding-right: 20px !important; }
+          /* Card image: shorter on mobile */
+          .card-img { height: 200px !important; }
+          /* Card image td: no extra padding */
+          .card-img-td { padding: 0 !important; line-height: 0 !important; font-size: 0 !important; }
+          /* Services grid: single column */
           .svc-col { display: block !important; width: 100% !important; padding-right: 0 !important; padding-left: 0 !important; padding-bottom: 10px !important; }
         }
       </style>
@@ -1055,7 +1064,7 @@ export async function generateQuoteEmailHtml(
     <!-- Outer wrapper -->
     <table cellpadding="0" cellspacing="0" border="0" role="presentation" style="${S.outerTable}">
       <tr>
-        <td align="center" style="padding:24px 0;">
+        <td align="center" class="outer-td" style="padding:24px 0;">
     
           <!-- Inner 600px container -->
           <table cellpadding="0" cellspacing="0" border="0" role="presentation" class="wrap" style="${S.wrap}">
