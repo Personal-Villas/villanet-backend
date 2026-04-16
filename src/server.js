@@ -21,6 +21,7 @@ import cartRoutes from './routes/cart.routes.js';
 import earlyAccessRoutes from './routes/early-access.routes.js';
 import quotesRoutes from './routes/quotes.routes.js'
 import leadsRoutes from './routes/leads.routes.js';
+import currencyRoutes from './routes/currency.routes.js';
 
 const app = express();
 
@@ -57,6 +58,7 @@ app.use('/property-managers', propertyManagersRoutes);
 app.use('/cart', cartRoutes);
 app.use('/early-access', earlyAccessRoutes);
 app.use('/api/leads', leadsRoutes);
+app.use('/api/currency', currencyRoutes);
 
 // Rutas protegidas
 app.use('/auth', authRoutes);
