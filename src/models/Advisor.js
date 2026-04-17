@@ -15,7 +15,8 @@ export const Advisor = {
       commission_preference,
       website,
       agreed_to_terms,
-      profile_completion_percentage
+      profile_completion_percentage,
+      preferred_currency
     } = advisorData;
 
     const query = `
@@ -23,9 +24,9 @@ export const Advisor = {
         first_name, last_name, email, password_hash, advisor_type, 
         travel_regions, typical_group_size, villa_budget_range, 
         commission_preference, website, agreed_to_terms, 
-        profile_completion_percentage, signup_completed_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-      RETURNING id, first_name, last_name, email, advisor_type, profile_completion_percentage
+        profile_completion_percentage, signup_completed_at, preferred_currency
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      RETURNING id, first_name, last_name, email, advisor_type, profile_completion_percentage, preferred_currency
     `;
 
     const values = [
@@ -41,7 +42,8 @@ export const Advisor = {
       website,
       agreed_to_terms,
       profile_completion_percentage,
-      new Date().toISOString()
+      new Date().toISOString(),
+      preferred_currency ?? 'USD'
     ];
 
     try {
@@ -85,17 +87,18 @@ export const Advisor = {
   },
 
   // Actualizar campos editables del advisor
-  async updateProfile(email, { website }) {
+  async updateProfile(email, { website, preferred_currency }) {
     const query = `
       UPDATE advisors
-      SET website = COALESCE($2, website),
-          updated_at = NOW()
+      SET website           = COALESCE($2, website),
+          preferred_currency = COALESCE($3, preferred_currency),
+          updated_at        = NOW()
       WHERE email = $1
       RETURNING id, first_name, last_name, email, advisor_type,
                 travel_regions, typical_group_size, villa_budget_range,
                 commission_preference, website, profile_completion_percentage, preferred_currency
     `;
-    const result = await pool.query(query, [email, website ?? null]);
+    const result = await pool.query(query, [email, website ?? null, preferred_currency ?? null]);
     return result.rows[0];
   }
 };

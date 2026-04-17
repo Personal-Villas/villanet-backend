@@ -58,7 +58,8 @@ export const advisorsController = {
         commission_preference,
         website,
         agreed_to_terms,
-        profile_completion_percentage
+        profile_completion_percentage,
+        preferred_currency
       } = req.body;
 
       // Validaciones básicas
@@ -111,7 +112,8 @@ export const advisorsController = {
           commission_preference:       commission_preference || null,
           website:                     website || null,
           agreed_to_terms:             agreed_to_terms || false,
-          profile_completion_percentage: profile_completion_percentage || 20
+          profile_completion_percentage: profile_completion_percentage || 20,
+          preferred_currency:          preferred_currency || 'USD'
         };
 
         newAdvisor = await Advisor.create(advisorData);
