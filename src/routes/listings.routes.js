@@ -244,6 +244,18 @@ r.get("/", auth(false), async (req, res) => {
      ***********************/
     if (!hasAvailabilityFilter) {
       const offset = (currentPage - 1) * lim;
+
+      // ── Page-level cache (2 min TTL) ──────────────────────────────────────
+      // Key encodes every dimension that affects the result set.
+      const pageCacheKey = `listings:page:${sort}:${lim}:${currentPage}:${
+        params.join(',')
+      }:${clauses.join('|')}`;
+      const cachedPage = cache.get(pageCacheKey);
+      if (cachedPage) {
+        console.log(`⚡ [Listings cache HIT] ${pageCacheKey.slice(0, 80)}`);
+        return res.json(cachedPage);
+      }
+
       const sql = `
         SELECT 
           l.listing_id AS id,
@@ -308,7 +320,7 @@ r.get("/", auth(false), async (req, res) => {
 
       const normalized = normalizeResults(rows.rows);
 
-      return res.json({
+      const pageResult = {
         results: normalized,
         total,
         limit: lim,
@@ -317,7 +329,10 @@ r.get("/", auth(false), async (req, res) => {
         totalPages,
         hasMore: currentPage < totalPages,
         availabilityApplied: false,
-      });
+      };
+
+      cache.set(pageCacheKey, pageResult, 120_000); // 2 min TTL
+      return res.json(pageResult);
     }
 
     /***********************
