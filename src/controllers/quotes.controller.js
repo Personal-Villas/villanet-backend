@@ -18,8 +18,10 @@ import {
 } from "../utils/errorResponse.js";
 import { createOpenAPIQuote } from "../services/openApiQuote.service.js";
 import { extractGuestyPriceBreakdown } from "../services/extractGuestyPriceBreakdown.js";
-
-
+import {
+  buildGuestyUrl,
+  resolveGuestyBookingDomain,
+} from "../utils/guestyUrl.js";
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
@@ -45,48 +47,9 @@ function toYmd(d) {
   return Number.isNaN(dt.getTime()) ? null : dt.toISOString().split("T")[0];
 }
 
-// ─── URL helpers ──────────────────────────────────────────────────────────────
-
-function normalizeBaseUrl(domainOrUrl) {
-  if (!domainOrUrl || typeof domainOrUrl !== "string") {
-    console.warn("⚠️  [buildGuestyUrl] guesty_booking_domain is null/empty — falling back to default domain. Check listings table.");
-    return "https://villanet.guestybookings.com";
-  }
-  const raw = domainOrUrl.trim().replace(/\/+$/, "");
-  const withProto =
-    raw.startsWith("http://") || raw.startsWith("https://")
-    
-      ? raw
-      : `https://${raw}`;
-  return withProto.replace(/\/+$/, "");
-}
-
-function buildGuestyUrl({
-  domainOrUrl,
-  listingId,
-  checkInYmd,
-  checkOutYmd,
-  guests,
-}) {
-  const base = normalizeBaseUrl(domainOrUrl);
-  const url = new URL(base);
-  const id = encodeURIComponent(String(listingId));
-
-  url.pathname = url.host.endsWith("guestybookings.com")
-    ? `/en/properties/${id}`
-    : `/villas/${id}`;
-
-  const g = Number(guests);
-  url.searchParams.set(
-    "minOccupancy",
-    String(Number.isFinite(g) && g > 0 ? g : 1),
-  );
-  if (checkInYmd) url.searchParams.set("checkIn", checkInYmd);
-  if (checkOutYmd) url.searchParams.set("checkOut", checkOutYmd);
-  return url.toString();
-}
-
 // ─── Controllers ──────────────────────────────────────────────────────────────
+// URL helpers (normalizeBaseUrl / local buildGuestyUrl) removed —
+// use src/utils/guestyUrl.js (buildGuestyUrl, resolveGuestyBookingDomain).
 
 export async function quotesAvailabilityCheck(req, res) {
   try {
@@ -237,9 +200,28 @@ export async function createQuote(req, res) {
     );
     const quoteId = quoteQuery.rows[0].id;
 
+    const listingIds = [...new Set(items.map((item) => String(item.id)))];
+    const listingDomainResult = await client.query(
+      `SELECT listing_id, guesty_booking_domain
+       FROM listings
+       WHERE listing_id = ANY($1::text[])`,
+      [listingIds],
+    );
+    const listingDomainById = new Map(
+      listingDomainResult.rows.map((row) => [
+        String(row.listing_id),
+        row.guesty_booking_domain,
+      ]),
+    );
+
     for (const item of items) {
       if (!item.id) throw new Error(`Item without ID: ${JSON.stringify(item)}`);
-      if (!item.guestyBookingDomain) throw new Error(`Missing guestyBookingDomain for property ${item.id}`);
+
+      // Prefer listing domain over client-supplied; never persist book.guesty.com / invalid hosts.
+      const resolvedDomain = resolveGuestyBookingDomain(
+        listingDomainById.get(String(item.id)),
+        item.guestyBookingDomain,
+      );
 
       await client.query(
         `INSERT INTO quote_items (quote_id, listing_id, listing_name, listing_location, bedrooms, bathrooms, price_usd, image_url, guesty_booking_domain)
@@ -248,7 +230,7 @@ export async function createQuote(req, res) {
           quoteId, item.id, item.name || null, item.location || null,
           item.bedrooms ?? null, item.bathrooms ?? null,
           item.priceUSD ? Number(item.priceUSD) : null,
-          item.imageUrl || null, item.guestyBookingDomain,
+          item.imageUrl || null, resolvedDomain,
         ]
       );
     }
@@ -377,9 +359,8 @@ export async function sendQuoteEmail(req, res) {
     const quote = updateResult.rows[0];
 
     const itemsResult = await client.query(
-
 `SELECT qi.*,
-        COALESCE(qi.guesty_booking_domain, l.guesty_booking_domain) AS guesty_booking_domain,
+        l.guesty_booking_domain AS listing_guesty_booking_domain,
         pm.logo_url as pm_logo_url, pm.name as pm_name,
         l.amenities_json,
         l.villanet_chef_included,
@@ -394,7 +375,7 @@ export async function sendQuoteEmail(req, res) {
  FROM quote_items qi
  LEFT JOIN listings l ON qi.listing_id = l.listing_id
  LEFT JOIN listing_property_managers pm ON l.listing_property_manager_id = pm.id
- WHERE qi.quote_id = $1`, [id] 
+ WHERE qi.quote_id = $1`, [id]
     );
     const dbItems = itemsResult.rows;
 
@@ -415,6 +396,12 @@ export async function sendQuoteEmail(req, res) {
       dbItems.map(async (item) => {
         let breakdown = null;
 
+        // listing domain first, then quote_item; both sanitized (never book.guesty.com).
+        const bookingDomain = resolveGuestyBookingDomain(
+          item.listing_guesty_booking_domain,
+          item.guesty_booking_domain,
+        );
+
         if (hasDates) {
           console.log("📅 Fechas entrando a OpenAPI:", { checkIn, checkOut, guests });
           breakdown = await getGuestyBreakdown(
@@ -423,14 +410,16 @@ export async function sendQuoteEmail(req, res) {
             checkOutYmd,
             quote.guests,
             0,
-            item.guesty_booking_domain
+            bookingDomain
           );
         }
 
         const guestyUrl = buildGuestyUrl({
-          domainOrUrl: item.guesty_booking_domain,
+          bookingDomain,
           listingId: item.listing_id,
-          checkInYmd, checkOutYmd, guests: quote.guests,
+          checkInYmd,
+          checkOutYmd,
+          guests: quote.guests,
         });
 
         // Fallback si no hay breakdown

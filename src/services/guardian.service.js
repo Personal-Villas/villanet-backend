@@ -11,6 +11,7 @@
 
 import { pool } from "../db.js";
 import { sendEmail } from "./email.service.js";
+import { buildGuestyUrl } from "../utils/guestyUrl.js";
 
 // ─── Configuración ────────────────────────────────────────────────────────────
 
@@ -36,24 +37,7 @@ const GUARDIAN_CONFIG = {
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Construye la URL de booking para una villa.
- * Lógica espejo de buildGuestyUrl en quotesController.js
- */
-function buildCheckUrl(guestyBookingDomain, listingId) {
-  const raw = (guestyBookingDomain || "book.guesty.com").trim().replace(/\/+$/, "");
-  const base = raw.startsWith("http://") || raw.startsWith("https://")
-    ? raw
-    : `https://${raw}`;
-
-  const url = new URL(base);
-  url.pathname = url.host.endsWith("guestybookings.com")
-    ? `/en/properties/${encodeURIComponent(listingId)}`
-    : `/villas/${encodeURIComponent(listingId)}`;
-
-  return url.toString();
-}
+// buildCheckUrl removed — use buildGuestyUrl from src/utils/guestyUrl.js
 
 /**
  * Guesty usa Next.js con SSR. Para propiedades que no existen, el servidor
@@ -252,7 +236,10 @@ export async function runGuardian() {
   // 2. Verificar cada URL con control de concurrencia
   const checkResults = await runWithConcurrency(
     listings.map((listing) => async () => {
-      const url = buildCheckUrl(listing.guesty_booking_domain, listing.listing_id);
+      const url = buildGuestyUrl({
+        bookingDomain: listing.guesty_booking_domain,
+        listingId: listing.listing_id,
+      });
       const status = await checkUrl(url);
 
       if (GUARDIAN_CONFIG.verboseLogging) {
