@@ -203,7 +203,7 @@ export async function sendInquiryNotification(data) {
     ? `${clientName}${clientEmail ? ` (${clientEmail})` : ''}`
     : clientEmail || 'Anonymous';
 
-  const villaLink = villaUrl || `https://thevillanet.com/property/${villaId}`;
+  const villaLink = villaUrl || `${process.env.FRONTEND_BASE_URL || 'https://agents.personalvillas.com'}/property/${villaId}`;
 
   const embed = {
     embeds: [{

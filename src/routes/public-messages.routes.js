@@ -9,7 +9,7 @@ const r = Router();
 
 const PROPERTY_MESSAGES_TO =
   process.env.PROPERTY_MESSAGES_TO ||
-  'nico_204@hotmail.com,jhony@personalvillas.com';
+  'info@personalvillas.com';
 
 /**
  * POST /public/property-messages
@@ -102,7 +102,7 @@ r.post('/property-messages', auth(false), async (req, res) => {
           <p><strong>IP:</strong> ${remoteIp || 'N/A'}</p>
           <p><strong>User-Agent:</strong> ${userAgent || 'N/A'}</p>
           <br><br>
-          <p style="font-size:12px; color:#888;">This notification was generated automatically by VillaNet.</p>
+          <p style="font-size:12px; color:#888;">This notification was generated automatically by Personal Villas Agents.</p>
         `,
       });
     } catch (emailErr) {
@@ -116,7 +116,7 @@ r.post('/property-messages', auth(false), async (req, res) => {
       message:     cleanMessage,
       clientEmail,
       clientName,
-      villaUrl:    `https://thevillanet.com/property/${listingId}`,
+      villaUrl:    `${process.env.FRONTEND_BASE_URL || 'https://agents.personalvillas.com'}/property/${listingId}`,
     }));
 
     return res.json({ success: true, id: messageId });

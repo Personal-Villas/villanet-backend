@@ -16,7 +16,7 @@ router.post('/', async (req, res) => {
     } = req.body;
 
     // Lista de correos electrónicos del equipo interno separados por coma
-    const teamEmails = 'reservations@villanet.com, nico_204@hotmail.com, jhony@personalvillas.com';
+    const teamEmails = 'info@personalvillas.com';
 
     // 1) Email al equipo interno
     await sendEmail({

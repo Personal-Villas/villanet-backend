@@ -336,7 +336,7 @@ async function sendGuardianReport({ broken, networkErrors, total, startedAt }) {
       html,
       // Gmail App Password requiere que 'from' sea el mismo SMTP_USER autenticado.
       // Sobreescribimos el SMTP_FROM del .env para este email en particular.
-      from: `"VillaNet Guardian" <${process.env.SMTP_USER}>`,
+      from: `"Personal Villas Agents Guardian" <${process.env.SMTP_USER}>`,
     });
     console.log(`📨 Guardian report sent to: ${recipients.join(", ")}`);
   } catch (emailErr) {
@@ -412,7 +412,7 @@ function buildReportHtml({ broken, networkErrors, total, startedAt }) {
 <div class="main-wrapper" style="max-width:700px;margin:0 auto;padding:32px 16px;">
 
   <div class="header-box" style="background:#09090b;border-radius:12px 12px 0 0;padding:28px 32px;text-align:center;">
-    <p style="margin:0 0 6px 0;font-size:11px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:#71717a;">VILLANET</p>
+    <p style="margin:0 0 6px 0;font-size:11px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:#71717a;">Personal Villas Agents</p>
     <h1 style="margin:0;font-size:22px;font-weight:700;color:#ffffff;">🛡️ Guardian Alert</h1>
   </div>
 
@@ -464,7 +464,7 @@ function buildReportHtml({ broken, networkErrors, total, startedAt }) {
     <ol style="margin:0;padding-left:18px;color:#78350f;font-size:13px;line-height:1.8;">
       <li>Log in to <strong>Guesty</strong> and search for each listing by ID.</li>
       <li>Verify that the listing is <strong>published</strong> and the booking page is enabled.</li>
-      <li>Check that the <strong>guesty_booking_domain</strong> in VillaNet's DB matches the property's actual booking domain.</li>
+      <li>Check that the <strong>guesty_booking_domain</strong> in the Personal Villas Agents database matches the property's actual booking domain.</li>
       <li>Once fixed, the next Guardian run will confirm the issue is resolved.</li>
     </ol>
   </div>
@@ -472,7 +472,7 @@ function buildReportHtml({ broken, networkErrors, total, startedAt }) {
   <!-- Footer -->
   <div style="text-align:center;padding:24px 0 8px;">
     <p style="margin:0;font-size:12px;color:#a1a1aa;">
-      VillaNet Guardian · Automated check run on ${dateStr} (EST)<br>
+      Personal Villas Agents Guardian · Automated check run on ${dateStr} (EST)<br>
       This report is sent automatically every 48 hours.
     </p>
   </div>

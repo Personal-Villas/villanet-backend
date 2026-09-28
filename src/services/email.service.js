@@ -67,7 +67,7 @@ export async function sendExpansionLeadNotification(leadData) {
       <div style="background: white; text-align: center;">
         <img 
           src="cid:logo@villanet" 
-          alt="VillaNet Logo"
+          alt="Personal Villas Agents Logo"
           style="max-width: 180px; height: auto; display: block; margin: 0 auto;"
         />
       </div>
@@ -211,7 +211,7 @@ export async function sendExpansionLeadNotification(leadData) {
           </a>
 
           <!-- Botón Dashboard -->
-          <a href="https://thevillanet.com/admin" 
+          <a href="${process.env.FRONTEND_BASE_URL || 'https://agents.personalvillas.com'}/admin" 
             style="
                 display: inline-block;
                 background-color: #000000;
@@ -231,7 +231,7 @@ export async function sendExpansionLeadNotification(leadData) {
       <!-- Footer -->
       <div style="background: #f8f9fa; padding: 20px; border-radius: 0 0 12px 12px; text-align: center; border-top: 1px solid #e0e0e0;">
         <p style="margin: 0; color: #999; font-size: 12px;">
-          This request was submitted from <strong>VillaNet Properties</strong> page<br>
+          This request was submitted from <strong>Personal Villas Agents Properties</strong> page<br>
           ${new Date().toLocaleString("en-US", {
             dateStyle: "full",
             timeStyle: "short",
@@ -244,7 +244,7 @@ export async function sendExpansionLeadNotification(leadData) {
 
   try {
     const info = await transporter.sendMail({
-      from: process.env.SMTP_FROM || '"VillaNet" <noreply@villanet.com>',
+      from: process.env.SMTP_FROM || '"Personal Villas Agents" <info@personalvillas.com>',
       to: process.env.NOTIFY_EMAIL || process.env.SMTP_USER,
       subject: `New Villa Request from ${full_name}${location ? ` - ${location}` : ""}`,
       html: emailBody,
@@ -346,7 +346,7 @@ export async function sendVillaInquiryNotification(leadData) {
   `
 
   const info = await transporter.sendMail({
-    from: process.env.SMTP_FROM || '"St. Barts Villas" <noreply@thevillanet.com>',
+    from: process.env.SMTP_FROM || '"Personal Villas Agents" <info@personalvillas.com>',
     to: process.env.NOTIFY_EMAIL || process.env.SMTP_USER,
     subject: `New Inquiry: ${listing_name || 'Villa'} — ${full_name}`,
     html: emailBody,
