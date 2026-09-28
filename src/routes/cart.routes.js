@@ -47,7 +47,7 @@ router.post('/export-pdf', async (req, res) => {
         <p>Hi,</p>
         <p>Please find attached the villa selection we prepared for <strong>${safeClientName}</strong>.</p>
         <p>This PDF includes a detailed overview of each selected villa with photos, location details, and indicative nightly rates.</p>
-        <p style="margin-top: 30px;">Best regards,<br/><strong>VillaNet Team</strong></p>
+        <p style="margin-top: 30px;">Best regards,<br/><strong>Personal Villas Agents Team</strong></p>
       </div>
     `;
 

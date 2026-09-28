@@ -83,18 +83,14 @@ export function generateCartPdf(listings, { clientName }) {
               .fontSize(18)
               .fillColor(COLORS.accent)
               .font('Helvetica-Bold')
-              .text('VILLA', margin, yPosition + 3, { continued: true })
-              .fillColor(COLORS.dark)
-              .text('NET');
+              .text('Personal Villas Agents', margin, yPosition + 3);
           }
         } catch (error) {
           doc
             .fontSize(18)
             .fillColor(COLORS.accent)
             .font('Helvetica-Bold')
-            .text('VILLA', margin, yPosition + 3, { continued: true })
-            .fillColor(COLORS.dark)
-            .text('NET');
+            .text('Personal Villas Agents', margin, yPosition + 3);
         }
 
         // Línea decorativa con gradiente simulado
@@ -439,7 +435,7 @@ export function generateCartPdf(listings, { clientName }) {
           .fontSize(9)
           .font('Helvetica-Bold')
           .fillColor(COLORS.dark)
-          .text('VillaNet', margin, footerY + 14, {
+          .text('Personal Villas Agents', margin, footerY + 14, {
             width: pageWidth - margin * 2,
             align: 'center',
           });
@@ -448,7 +444,7 @@ export function generateCartPdf(listings, { clientName }) {
           .fontSize(8.5)
           .font('Helvetica')
           .fillColor(COLORS.textLight)
-          .text('Luxury Villa Rentals  •  contact@villanet.com', margin, footerY + 28, {
+          .text('Luxury Villa Rentals  •  reservations@personalvillas.com', margin, footerY + 28, {
             width: pageWidth - margin * 2,
             align: 'center',
           });

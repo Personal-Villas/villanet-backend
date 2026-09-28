@@ -245,7 +245,7 @@ export async function sendExpansionLeadNotification(leadData) {
   try {
     const info = await transporter.sendMail({
       from: process.env.SMTP_FROM || '"VillaNet" <noreply@villanet.com>',
-      to: process.env.SMTP_USER, // Enviar al email del equipo
+      to: process.env.NOTIFY_EMAIL || process.env.SMTP_USER,
       subject: `New Villa Request from ${full_name}${location ? ` - ${location}` : ""}`,
       html: emailBody,
       // Reply-to para facilitar respuesta directa
@@ -347,7 +347,7 @@ export async function sendVillaInquiryNotification(leadData) {
 
   const info = await transporter.sendMail({
     from: process.env.SMTP_FROM || '"St. Barts Villas" <noreply@thevillanet.com>',
-    to: process.env.SMTP_USER,
+    to: process.env.NOTIFY_EMAIL || process.env.SMTP_USER,
     subject: `New Inquiry: ${listing_name || 'Villa'} — ${full_name}`,
     html: emailBody,
     replyTo: user_email,

@@ -87,12 +87,12 @@ const pendingSendCode = new Map();
 // Enviar email con código
 async function sendVerificationEmail(email, code) {
   const mailOptions = {
-    from: process.env.SMTP_FROM || '"Villanet" <noreply@villanet.com>',
+    from: process.env.SMTP_FROM || '"Personal Villas Agents" <info@personalvillas.com>',
     to: email,
-    subject: "Your Villanet verification code",
+    subject: "Your Personal Villas Agents verification code",
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #000;">Welcome to Villanet</h2>
+        <h2 style="color: #000;">Welcome to Personal Villas Agents</h2>
         <p style="font-size: 16px; color: #333;">Your verification code is:</p>
         <div style="background: #f5f5f5; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0;">
           <h1 style="font-size: 32px; letter-spacing: 8px; margin: 0; color: #000;">${code}</h1>
@@ -642,13 +642,13 @@ export const AuthController = {
 
       // Reusar el transporter existente con template consistente con el resto
       const mailOptions = {
-        from: process.env.SMTP_FROM || '"Villanet" <noreply@villanet.com>',
+        from: process.env.SMTP_FROM || '"Personal Villas Agents" <info@personalvillas.com>',
         to: normalizedEmail,
-        subject: "Reset your Villanet password",
+        subject: "Reset your Personal Villas Agents password",
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
             <h2 style="color: #000;">Reset your password</h2>
-            <p style="font-size: 16px; color: #333;">Enter this code to reset your Villanet password:</p>
+            <p style="font-size: 16px; color: #333;">Enter this code to reset your Personal Villas Agents password:</p>
             <div style="background: #f5f5f5; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0;">
               <h1 style="font-size: 32px; letter-spacing: 8px; margin: 0; color: #000;">${code}</h1>
             </div>

@@ -39,7 +39,7 @@ router.post('/', async (req, res) => {
       `,
     });
 
-    const LOGO_URL = 'https://i.ibb.co/rGtGY6Z4/isotype-iris.png'; 
+    const LOGO_URL = process.env.EMAIL_LOGO_URL || 'https://agents.personalvillas.com/email-logo.png';
     const PRIMARY_COLOR = '#006699';
     
     // 2) Email de confirmación al huésped
@@ -52,7 +52,7 @@ router.post('/', async (req, res) => {
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 20px;">
                 <tr>
                     <td align="center" style="padding-bottom: 10px; border-bottom: 3px solid ${PRIMARY_COLOR};">
-                        <img src="${LOGO_URL}" alt="Villanet Logo" width="150" style="display: block; border: 0;" />
+                        <img src="${LOGO_URL}" alt="Personal Villas Agents Logo" width="150" style="display: block; border: 0;" />
                     </td>
                 </tr>
             </table>
@@ -79,8 +79,8 @@ router.post('/', async (req, res) => {
                     <td align="center">
                         <p style="font-size: 12px; color: #999999; margin: 0;">
                             Best regards,<br>
-                            The Villanet Team<br>
-                            <a href="mailto:reservations@villanet.com" style="color: ${PRIMARY_COLOR}; text-decoration: none;">reservations@villanet.com</a>
+                            The Personal Villas Agents Team<br>
+                            <a href="mailto:reservations@personalvillas.com" style="color: ${PRIMARY_COLOR}; text-decoration: none;">reservations@personalvillas.com</a>
                         </p>
                     </td>
                 </tr>

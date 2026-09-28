@@ -695,7 +695,7 @@ export async function generateQuoteEmailHtml(
   // Helper: renders a larger inline CID icon (14px, used in services section)
   const icon14 = (cid) => `<img src="cid:${cid}@villanet" width="14" height="14" style="vertical-align:middle;margin-right:6px;display:inline;" alt="">`;
 
-  // ── Header branding: TA logo > TA name > VillaNet logo (fallback) ──────────
+  // ── Header branding: TA logo > TA name > Personal Villas Agents logo (fallback) ──
   let headerBrandHtml;
   if (taLogoUrl) {
     // Escenario A: TA tiene logo cargado
@@ -705,8 +705,8 @@ export async function generateQuoteEmailHtml(
     // Escenario B: TA tiene nombre pero no logo
     headerBrandHtml = `<p style="margin:0;font-size:22px;font-weight:700;letter-spacing:0.01em;color:#09090b;font-family:Georgia,'Times New Roman',serif;">${taName}</p>`;
   } else {
-    // Fallback final: logo de VillaNet
-    headerBrandHtml = `<img src="https://imagenes-logos-villanet.s3.us-east-1.amazonaws.com/logo-villanet.png" alt="VillaNet"
+    // Fallback final: logo Personal Villas Agents
+    headerBrandHtml = `<img src="${process.env.EMAIL_LOGO_URL || 'https://agents.personalvillas.com/email-logo.png'}" alt="Personal Villas Agents"
       width="160" style="display:block;margin:0 auto;max-height:50px;width:auto;" border="0">`;
   }
 
@@ -1106,7 +1106,7 @@ export async function generateQuoteEmailHtml(
             <!-- ══ FOOTER ══ -->
             <tr>
               <td class="pad" style="${S.ftCell}">
-                <p style="${S.ftP}">Villa Net provides access to thousands of professionally managed vacation rentals around the world. Please contact your travel advisor for more information.</p>
+                <p style="${S.ftP}">Personal Villas Agents provides access to thousands of professionally managed vacation rentals around the world. Please contact your travel advisor for more information.</p>
                 ${showAltCurrency ? `
                 <p style="${S.ftP}">
                   * ${displayCurrency} amounts shown for reference only
